@@ -55,6 +55,7 @@ defmodule TeslaMate.MixProject do
       {:gettext, "~> 1.0", override: true},
       {:jason, "~> 1.4"},
       {:mock, "~> 0.3", only: :test},
+      {:myxql, "~> 0.7"},
       {:nimble_csv, "~> 1.3"},
       {:phoenix, "~> 1.7.0"},
       {:phoenix_bakery, "~> 1.0", runtime: false},

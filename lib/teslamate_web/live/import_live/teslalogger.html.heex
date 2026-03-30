@@ -1,0 +1,138 @@
+<nav class="breadcrumb" aria-label="breadcrumbs">
+  <ul>
+    <li><.link navigate={~p"/"}><%= gettext("Home") %></.link></li>
+    <li class="is-active"><.link navigate="">TeslaLogger Import</.link></li>
+  </ul>
+</nav>
+
+<h2 class="title is-4">TeslaLogger Import</h2>
+
+<%= if @status.state == :idle do %>
+  <div class="box">
+    <h3 class="title is-5"><%= gettext("Car Configuration") %></h3>
+    <p class="mb-4">
+      Optional: Provide VIN, EID, and VID if TeslaLogger doesn't store them.
+      Leave empty to auto-generate placeholder values.
+    </p>
+
+    <div class="field">
+      <label class="label">VIN</label>
+      <div class="control">
+        <input class="input" type="text" placeholder="5YJ3E1EA1LF000000"
+               value={@car_vin} phx-keyup="update_car_vin" phx-debounce="300" />
+      </div>
+    </div>
+
+    <div class="columns">
+      <div class="column">
+        <div class="field">
+          <label class="label">EID (Tesla API ID)</label>
+          <div class="control">
+            <input class="input" type="text" placeholder="1234567890"
+                   value={@car_eid} phx-keyup="update_car_eid" phx-debounce="300" />
+          </div>
+        </div>
+      </div>
+      <div class="column">
+        <div class="field">
+          <label class="label">VID (Vehicle ID)</label>
+          <div class="control">
+            <input class="input" type="text" placeholder="1234567891"
+                   value={@car_vid} phx-keyup="update_car_vid" phx-debounce="300" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="field mt-5">
+      <div class="control">
+        <button class="button is-success is-fullwidth" phx-click="start_import"
+                phx-disable-with="Starting...">
+          <%= gettext("Start Import") %>
+        </button>
+      </div>
+    </div>
+  </div>
+<% end %>
+
+<%= if @status.state != :idle do %>
+  <div class="box">
+    <h3 class="title is-5"><%= gettext("Import Progress") %></h3>
+
+    <%= if @status.car_count > 0 do %>
+      <p class="mb-4">
+        Found <strong><%= @status.car_count %></strong> car(s) in TeslaLogger
+      </p>
+    <% end %>
+
+    <table class="table is-fullwidth is-hoverable">
+      <thead>
+        <tr>
+          <th><%= gettext("Step") %></th>
+          <th><%= gettext("Status") %></th>
+          <th><%= gettext("Progress") %></th>
+        </tr>
+      </thead>
+      <tbody>
+        <%= for step <- @status.steps do %>
+          <tr>
+            <td><%= step_label(step.name) %></td>
+            <td>
+              <span>
+                <%= case step.status do %>
+                  <% :pending -> %>
+                    <span class="icon has-text-grey-light">
+                      <span class="mdi mdi-clock-outline"></span>
+                    </span>
+                  <% :running -> %>
+                    <%= content_tag(:span, nil, class: "is-loading") %>
+                  <% :complete -> %>
+                    <span class="icon has-text-success">
+                      <span class="mdi mdi-check-bold"></span>
+                    </span>
+                  <% {:error, reason} -> %>
+                    <span class="icon has-text-danger" title={inspect(reason)}>
+                      <span class="mdi mdi-alert-circle"></span>
+                    </span>
+                <% end %>
+              </span>
+            </td>
+            <td style="font-variant-numeric: tabular-nums;">
+              <%= format_progress(step) %>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+<% end %>
+
+<%= if @status.state == :complete do %>
+  <div class="notification is-success">
+    <strong>Import complete!</strong>
+    Geocoding will continue in the background. Check the Grafana dashboards to verify the imported data.
+  </div>
+<% end %>
+
+<%= if match?({:error, _}, @status.state) do %>
+  <div class="notification is-danger">
+    <strong>Import failed:</strong>
+    <code><%= inspect(elem(@status.state, 1), pretty: true) %></code>
+  </div>
+<% end %>
+
+<%= if @status.warnings != [] do %>
+  <div class="box mt-4">
+    <h3 class="title is-5"><%= gettext("Validation Warnings") %></h3>
+    <div class="content" style="max-height: 400px; overflow-y: auto;">
+      <ul>
+        <%= for warning <- Enum.take(@status.warnings, 50) do %>
+          <li class="has-text-warning-dark"><%= warning %></li>
+        <% end %>
+        <%= if length(@status.warnings) > 50 do %>
+          <li>... and <%= length(@status.warnings) - 50 %> more</li>
+        <% end %>
+      </ul>
+    </div>
+  </div>
+<% end %>

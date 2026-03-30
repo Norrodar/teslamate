@@ -180,6 +180,16 @@ end
 if config_env() != :test do
   config :teslamate,
     import_directory: System.get_env("IMPORT_DIR", "import") |> Util.validate_import_dir()
+
+  if System.get_env("TESLALOGGER_IMPORT") == "true" do
+    config :teslamate, :teslalogger_import,
+      host: System.get_env("TESLALOGGER_MYSQL_HOST", "localhost"),
+      port: System.get_env("TESLALOGGER_MYSQL_PORT", "3306") |> String.to_integer(),
+      username: System.get_env("TESLALOGGER_MYSQL_USER", "root"),
+      password: System.get_env("TESLALOGGER_MYSQL_PASSWORD", "teslalogger"),
+      database: System.get_env("TESLALOGGER_MYSQL_DATABASE", "teslalogger"),
+      timezone: System.get_env("TESLALOGGER_TIMEZONE", "Europe/Berlin")
+  end
 end
 
 config :teslamate, :srtm_cache, System.get_env("SRTM_CACHE", ".srtm_cache")

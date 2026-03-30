@@ -18,9 +18,44 @@ defmodule TeslaMate.Application do
 
   defp children do
     mqtt_config = Application.get_env(:teslamate, :mqtt)
+    teslalogger_config = Application.get_env(:teslamate, :teslalogger_import)
 
-    case Application.get_env(:teslamate, :import_directory) do
-      nil ->
+    if teslalogger_config != nil and Application.get_env(:teslamate, :import_directory) != nil do
+      Logger.warning("Both TESLALOGGER_IMPORT and IMPORT_DIR configured. Using TeslaLogger import.")
+    end
+
+    cond do
+      teslalogger_config != nil ->
+        [
+          TeslaMate.Repo,
+          TeslaMate.Vault,
+          TeslaMate.HTTP,
+          TeslaMate.Api,
+          TeslaMate.Updater,
+          {Phoenix.PubSub, name: TeslaMate.PubSub},
+          TeslaMateWeb.Endpoint,
+          {TeslaMate.Terrain, disabled: true},
+          {TeslaMate.Repair, limit: 250},
+          {TeslaMate.Import.TeslaLogger, config: teslalogger_config}
+        ]
+
+      Application.get_env(:teslamate, :import_directory) != nil ->
+        import_directory = Application.get_env(:teslamate, :import_directory)
+
+        [
+          TeslaMate.Repo,
+          TeslaMate.Vault,
+          TeslaMate.HTTP,
+          TeslaMate.Api,
+          TeslaMate.Updater,
+          {Phoenix.PubSub, name: TeslaMate.PubSub},
+          TeslaMateWeb.Endpoint,
+          {TeslaMate.Terrain, disabled: true},
+          {TeslaMate.Repair, limit: 250},
+          {TeslaMate.Import, directory: import_directory}
+        ]
+
+      true ->
         [
           TeslaMate.Repo,
           TeslaMate.Vault,
@@ -35,20 +70,6 @@ defmodule TeslaMate.Application do
           TeslaMate.Repair
         ]
         |> Enum.reject(&is_nil/1)
-
-      import_directory ->
-        [
-          TeslaMate.Repo,
-          TeslaMate.Vault,
-          TeslaMate.HTTP,
-          TeslaMate.Api,
-          TeslaMate.Updater,
-          {Phoenix.PubSub, name: TeslaMate.PubSub},
-          TeslaMateWeb.Endpoint,
-          {TeslaMate.Terrain, disabled: true},
-          {TeslaMate.Repair, limit: 250},
-          {TeslaMate.Import, directory: import_directory}
-        ]
     end
   end
 
