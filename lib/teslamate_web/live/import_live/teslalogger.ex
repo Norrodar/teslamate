@@ -11,8 +11,8 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
     if TLImport.enabled?() do
       if connected?(socket) do
         :ok = TLImport.subscribe()
-        # Trigger preflight to discover VINs
-        :ok = TLImport.preflight()
+        # preflight may return {:error, :busy} if already running
+        _result = TLImport.preflight()
       end
 
       status = TLImport.get_status()
@@ -37,7 +37,6 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
   def handle_event("start_import", _params, socket) do
     mode = socket.assigns.import_mode
 
-    # Mode C requires confirmation
     if mode == "merge_tl" do
       {:noreply, assign(socket, show_destructive_warning: true)}
     else
@@ -68,6 +67,20 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
   def handle_event("update_car_vid", %{"value" => vid}, socket) do
     {:noreply, assign(socket, car_vid: vid)}
+  end
+
+  def handle_event("apply_car_values", %{"car-id" => car_id_str}, socket) do
+    car_id = String.to_integer(car_id_str)
+
+    car_info =
+      Enum.find(socket.assigns.status.mysql_car_info, fn c -> c["id"] == car_id end)
+
+    if car_info do
+      vin = car_info["vin"] || ""
+      {:noreply, assign(socket, car_vin: vin)}
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl true
@@ -102,6 +115,9 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
       {:error, :already_running} ->
         {:noreply, socket}
+
+      {:error, _reason} ->
+        {:noreply, socket}
     end
   end
 
@@ -117,34 +133,107 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
     <h2 class="title is-4">TeslaLogger Import</h2>
 
-    <%= if @status.state == :idle do %>
-      <div class="box">
-        <h3 class="title is-5"><%= gettext("Car Configuration") %></h3>
+    <%!-- Preflight Check Box --%>
+    <%= if @status.preflight_steps != [] do %>
+      <div class="box mb-4">
+        <div class="is-flex is-justify-content-space-between is-align-items-center mb-3">
+          <h3 class="title is-5 mb-0">Preflight Check</h3>
+          <%= if preflight_all_complete?(@status.preflight_steps) do %>
+            <span class="icon has-text-success"><span class="mdi mdi-check-circle mdi-24px"></span></span>
+          <% end %>
+        </div>
 
-        <%= if @status.mysql_car_info != [] do %>
-          <div class="mb-4">
-            <%= for car_info <- @status.mysql_car_info do %>
-              <%= if car_info["vin"] && car_info["vin"] != "" do %>
-                <div class="notification is-success is-light py-2 px-3 mb-2">
-                  <span class="icon"><span class="mdi mdi-check-circle"></span></span>
-                  <strong>Car <%= car_info["id"] %></strong>: VIN from TeslaLogger: <code><%= car_info["vin"] %></code>
-                  <%= if car_info["display_name"] do %>
-                    (<%= car_info["display_name"] %>)
-                  <% end %>
-                </div>
-              <% else %>
-                <div class="notification is-warning is-light py-2 px-3 mb-2">
-                  <span class="icon"><span class="mdi mdi-alert"></span></span>
-                  <strong>Car <%= car_info["id"] %></strong>: No VIN found in TeslaLogger
-                  <%= if car_info["display_name"] do %>
-                    (<%= car_info["display_name"] %>)
-                  <% end %>
-                  — <strong>Please enter VIN below!</strong>
-                </div>
+        <%= for step <- @status.preflight_steps do %>
+          <div class="is-flex is-align-items-center mb-2">
+            <span class="icon mr-2">
+              <%= case step.status do %>
+                <% :pending -> %>
+                  <span class="mdi mdi-circle-outline has-text-grey-light"></span>
+                <% :running -> %>
+                  <span class="mdi mdi-loading mdi-spin has-text-info"></span>
+                <% :complete -> %>
+                  <span class="mdi mdi-check-circle has-text-success"></span>
+                <% {:error, _} -> %>
+                  <span class="mdi mdi-alert-circle has-text-danger"></span>
               <% end %>
-            <% end %>
+            </span>
+            <span>
+              <strong><%= preflight_step_label(step.name) %></strong>
+              <%= if step.detail do %>
+                <span class="has-text-grey ml-1">— <%= step.detail %></span>
+              <% end %>
+            </span>
           </div>
         <% end %>
+
+        <%= if match?({:error, _}, @status.state) and @status.current_step == nil do %>
+          <div class="notification is-danger is-light mt-3 mb-0 py-2 px-3">
+            <strong>Preflight failed:</strong> <%= elem(@status.state, 1) %>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+
+    <%!-- Found Cars Box (only after preflight completes) --%>
+    <%= if @status.state == :idle and @status.mysql_car_info != [] do %>
+      <div class="box mb-4">
+        <h3 class="title is-5">Found Cars</h3>
+
+        <%= for car_info <- @status.mysql_car_info do %>
+          <div class={"notification is-light py-3 px-4 mb-3 #{car_notification_class(car_info)}"}>
+            <div class="is-flex is-justify-content-space-between is-align-items-start">
+              <div>
+                <p class="mb-1">
+                  <strong>Car <%= car_info["id"] %></strong>
+                  <%= if car_info["display_name"] do %>
+                    — "<%= car_info["display_name"] %>"
+                  <% end %>
+                </p>
+
+                <p class="mb-1">
+                  <%= if car_info["vin"] && car_info["vin"] != "" do %>
+                    <span class="icon-text">
+                      <span class="icon has-text-success"><span class="mdi mdi-check"></span></span>
+                      <span>VIN: <code><%= car_info["vin"] %></code></span>
+                    </span>
+                  <% else %>
+                    <span class="icon-text">
+                      <span class="icon has-text-warning"><span class="mdi mdi-alert"></span></span>
+                      <span>VIN: <em>Not found — enter manually below</em></span>
+                    </span>
+                  <% end %>
+                </p>
+
+                <p class="mb-0">
+                  <%= if car_info["tm_data_counts"] && map_size(car_info["tm_data_counts"]) > 0 do %>
+                    <span class="icon-text">
+                      <span class="icon has-text-info"><span class="mdi mdi-database"></span></span>
+                      <span>TeslaMate: <%= format_tm_data_counts(car_info["tm_data_counts"]) %></span>
+                    </span>
+                  <% else %>
+                    <span class="icon-text">
+                      <span class="icon has-text-grey-light"><span class="mdi mdi-database-outline"></span></span>
+                      <span class="has-text-grey">TeslaMate: No existing data</span>
+                    </span>
+                  <% end %>
+                </p>
+              </div>
+
+              <%= if car_info["vin"] && car_info["vin"] != "" do %>
+                <button class="button is-small is-info is-outlined"
+                        phx-click="apply_car_values" phx-value-car-id={car_info["id"]}>
+                  <span class="icon"><span class="mdi mdi-content-copy"></span></span>
+                  <span>Apply Values</span>
+                </button>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+
+      <%!-- Car Configuration Box --%>
+      <div class="box mb-4">
+        <h3 class="title is-5"><%= gettext("Car Configuration") %></h3>
 
         <div class="field">
           <label class="label">VIN <span class="has-text-grey-light has-text-weight-normal">— optional, recommended</span></label>
@@ -177,6 +266,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         </div>
       </div>
 
+      <%!-- Import Mode Box --%>
       <div class="box">
         <h3 class="title is-5"><%= gettext("Import Mode") %></h3>
 
@@ -192,26 +282,41 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
             </p>
           </label>
 
-          <label class="radio mb-3" style="display: block;">
+          <label class={"radio mb-3 #{unless @status.tm_has_data, do: "has-text-grey-light"}"} style="display: block;">
             <input type="radio" name="import_mode" value="merge_tm"
                    checked={@import_mode == "merge_tm"}
+                   disabled={not @status.tm_has_data}
                    phx-click="select_mode" phx-value-value="merge_tm" />
             <strong>Merge (TeslaMate priority)</strong>
-            <p class="has-text-grey ml-5">
+            <p class={"ml-5 #{if @status.tm_has_data, do: "has-text-grey", else: "has-text-grey-light"}"}>
               Only imports data for time periods where TeslaMate has no data.
               Existing TeslaMate data remains unchanged.
             </p>
+            <%= unless @status.tm_has_data do %>
+              <p class="ml-5 is-size-7 has-text-grey-light">
+                <span class="icon is-small"><span class="mdi mdi-information-outline"></span></span>
+                No existing TeslaMate data — merge not needed
+              </p>
+            <% end %>
           </label>
 
-          <label class="radio mb-3" style="display: block;">
+          <label class={"radio mb-3 #{unless @status.tm_has_data, do: "has-text-grey-light"}"} style="display: block;">
             <input type="radio" name="import_mode" value="merge_tl"
                    checked={@import_mode == "merge_tl"}
+                   disabled={not @status.tm_has_data}
                    phx-click="select_mode" phx-value-value="merge_tl" />
             <strong>Merge (TeslaLogger priority)</strong>
-            <p class="has-text-danger ml-5">
-              <span class="icon"><span class="mdi mdi-alert"></span></span>
-              Deletes overlapping TeslaMate data and replaces it with TeslaLogger data!
-            </p>
+            <%= if @status.tm_has_data do %>
+              <p class="has-text-danger ml-5">
+                <span class="icon"><span class="mdi mdi-alert"></span></span>
+                Deletes overlapping TeslaMate data and replaces it with TeslaLogger data!
+              </p>
+            <% else %>
+              <p class="ml-5 is-size-7 has-text-grey-light">
+                <span class="icon is-small"><span class="mdi mdi-information-outline"></span></span>
+                No existing TeslaMate data — merge not needed
+              </p>
+            <% end %>
           </label>
         </div>
 
@@ -226,6 +331,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
       </div>
     <% end %>
 
+    <%!-- Destructive Mode Confirmation Modal --%>
     <%= if @show_destructive_warning do %>
       <div class="modal is-active">
         <div class="modal-background" phx-click="cancel_destructive"></div>
@@ -255,7 +361,9 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
       </div>
     <% end %>
 
-    <%= if @status.state != :idle do %>
+    <%!-- Import Progress --%>
+    <%= if @status.state == :running or @status.state == :complete or
+           (match?({:error, _}, @status.state) and @status.current_step != nil) do %>
       <div class="box">
         <h3 class="title is-5"><%= gettext("Import Progress") %></h3>
 
@@ -293,7 +401,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                           <span class="mdi mdi-clock-outline"></span>
                         </span>
                       <% :running -> %>
-                        <span class="is-loading"></span>
+                        <span class="mdi mdi-loading mdi-spin has-text-info"></span>
                       <% :complete -> %>
                         <span class="icon has-text-success">
                           <span class="mdi mdi-check-bold"></span>
@@ -314,8 +422,14 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                   <%= format_progress(step) %>
                 </td>
                 <td style="font-variant-numeric: tabular-nums;">
-                  <%= if step.status == :complete and step.total > 0 do %>
-                    <strong><%= format_number(step.imported) %></strong>
+                  <%= cond do %>
+                    <% step.status == :complete and step.total > 0 -> %>
+                      <strong><%= format_number(step.imported) %></strong>
+                    <% step.status == :complete -> %>
+                      <span class="icon has-text-success is-small">
+                        <span class="mdi mdi-check"></span>
+                      </span>
+                    <% true -> %>
                   <% end %>
                 </td>
               </tr>
@@ -332,7 +446,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
       </div>
     <% end %>
 
-    <%= if match?({:error, _}, @status.state) do %>
+    <%= if match?({:error, _}, @status.state) and @status.current_step != nil do %>
       <div class="notification is-danger">
         <strong>Import failed:</strong>
         <code><%= inspect(elem(@status.state, 1), pretty: true) %></code>
@@ -345,7 +459,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         <div class="content" style="max-height: 400px; overflow-y: auto;">
           <ul>
             <%= for warning <- Enum.take(@status.warnings, 50) do %>
-              <li class="has-text-warning-dark"><%= warning %></li>
+              <li class="has-text-warning"><%= warning %></li>
             <% end %>
             <%= if length(@status.warnings) > 50 do %>
               <li>... and <%= length(@status.warnings) - 50 %> more</li>
@@ -366,6 +480,31 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
       {i, _} -> i
       :error -> nil
     end
+  end
+
+  defp preflight_all_complete?(steps) do
+    Enum.all?(steps, fn s -> s.status == :complete end)
+  end
+
+  defp preflight_step_label(:connecting), do: "Connecting to MySQL"
+  defp preflight_step_label(:reading_source), do: "Reading TeslaLogger data"
+  defp preflight_step_label(:checking_target), do: "Checking TeslaMate database"
+  defp preflight_step_label(name), do: Atom.to_string(name)
+
+  defp car_notification_class(car_info) do
+    cond do
+      car_info["vin"] == nil or car_info["vin"] == "" -> "is-warning"
+      car_info["tm_data_counts"] && map_size(car_info["tm_data_counts"]) > 0 -> "is-info"
+      true -> "is-success"
+    end
+  end
+
+  defp format_tm_data_counts(counts) when map_size(counts) == 0, do: "No existing data"
+
+  defp format_tm_data_counts(counts) do
+    counts
+    |> Enum.map(fn {k, v} -> "#{format_number(v)} #{k}" end)
+    |> Enum.join(", ")
   end
 
   defp step_label(name) do
