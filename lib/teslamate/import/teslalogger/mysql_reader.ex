@@ -101,7 +101,7 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
   def read_positions(conn, car_id) do
     query = """
     SELECT id, Datum, lat, lng, speed, power, odometer, altitude,
-           battery_level, usable_battery_level, inside_temp, outside_temp,
+           battery_level, inside_temp, outside_temp,
            battery_heater, battery_range_km, ideal_battery_range_km
     FROM pos
     WHERE CarID = ?

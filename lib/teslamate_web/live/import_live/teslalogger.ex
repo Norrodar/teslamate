@@ -220,7 +220,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
               </div>
 
               <%= if car_info["vin"] && car_info["vin"] != "" do %>
-                <button class="button is-small is-info is-outlined"
+                <button class="button is-small is-info"
                         phx-click="apply_car_values" phx-value-car-id={car_info["id"]}>
                   <span class="icon"><span class="mdi mdi-content-copy"></span></span>
                   <span>Apply Values</span>

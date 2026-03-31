@@ -16,7 +16,6 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       odometer: to_float(row["odometer"]),
       elevation: to_integer(row["altitude"]),
       battery_level: to_integer(row["battery_level"]),
-      usable_battery_level: to_integer(row["usable_battery_level"]),
       inside_temp: to_decimal(row["inside_temp"]),
       outside_temp: to_decimal(row["outside_temp"]),
       battery_heater: to_boolean(row["battery_heater"]),
