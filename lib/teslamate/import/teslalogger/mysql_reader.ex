@@ -137,7 +137,7 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
   @doc "Reads charge data points for a given car, ordered by timestamp."
   def read_charges(conn, car_id) do
     query = """
-    SELECT c.id, c.Datum, c.battery_level, c.usable_battery_level,
+    SELECT c.id, c.Datum, c.battery_level,
            c.charge_energy_added,
            c.charger_power, c.ideal_battery_range_km,
            c.battery_range_km,

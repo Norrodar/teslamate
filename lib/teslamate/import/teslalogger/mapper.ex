@@ -139,7 +139,6 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
     %{
       date: to_utc(row["Datum"], timezone),
       battery_level: to_integer(row["battery_level"]),
-      usable_battery_level: to_integer(row["usable_battery_level"]),
       charge_energy_added: to_decimal(row["charge_energy_added"]),
       charger_power: to_integer(row["charger_power"]),
       ideal_battery_range_km: to_decimal(row["ideal_battery_range_km"]),
