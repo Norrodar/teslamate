@@ -5,6 +5,8 @@ defmodule TeslaMate.Import.TeslaLogger do
 
   require Logger
 
+  import Ecto.Query
+
   alias __MODULE__.{Status, MysqlReader, Mapper, Validator, Writer}
   alias TeslaMate.{Repo, Repair}
   alias TeslaMate.Log
@@ -27,7 +29,8 @@ defmodule TeslaMate.Import.TeslaLogger do
   end
 
   def get_status, do: GenServer.call(@name, :get_status)
-  def run(car_mapping \\ %{}), do: GenServer.call(@name, {:run, car_mapping}, :infinity)
+  def run(car_mapping \\ %{}, opts \\ []), do: GenServer.call(@name, {:run, car_mapping, opts}, :infinity)
+  def preflight, do: GenServer.call(@name, :preflight, :infinity)
   def enabled?, do: is_pid(Process.whereis(@name))
   def subscribe, do: Phoenix.PubSub.subscribe(TeslaMate.PubSub, @topic)
 
@@ -42,13 +45,57 @@ defmodule TeslaMate.Import.TeslaLogger do
     {:reply, state.status, state}
   end
 
-  def handle_call({:run, car_mapping}, _from, state) do
-    state = %{state | car_mapping: car_mapping}
-    send(self(), :start_import)
+  def handle_call(:preflight, _from, state) do
+    send(self(), :run_preflight)
     {:reply, :ok, state}
   end
 
+  def handle_call({:run, car_mapping, opts}, _from, state) do
+    if state.status.state == :running do
+      {:reply, {:error, :already_running}, state}
+    else
+      mode = Keyword.get(opts, :mode, :clean)
+      state = %{state | car_mapping: car_mapping}
+      state = update_status(state, fn s -> %{s | import_mode: mode} end)
+      send(self(), :start_import)
+      {:reply, :ok, state}
+    end
+  end
+
   @impl true
+  def handle_info(:run_preflight, state) do
+    parent = self()
+
+    Task.start_link(fn ->
+      result_state =
+        state
+        |> update_status(&Status.set_state(&1, :connecting))
+        |> connect_mysql()
+        |> case do
+          {:error, reason, state} ->
+            update_status(state, &Status.set_state(&1, {:error, "MySQL connection failed: #{inspect(reason)}"}))
+
+          {:ok, state} ->
+            case run_preflight_check(state) do
+              {:error, reason, state} ->
+                update_status(state, &Status.set_state(&1, {:error, reason}))
+
+              {:ok, state} ->
+                # Preflight done, back to idle with car_info populated
+                update_status(state, &Status.set_state(&1, :idle))
+            end
+        end
+
+      send(parent, {:preflight_done, result_state})
+    end)
+
+    {:noreply, state}
+  end
+
+  def handle_info({:preflight_done, result_state}, _state) do
+    {:noreply, result_state}
+  end
+
   def handle_info(:start_import, state) do
     parent = self()
 
@@ -67,19 +114,106 @@ defmodule TeslaMate.Import.TeslaLogger do
   ## Import Orchestration
 
   defp do_import(state) do
-    state
-    |> update_status(&Status.set_state(&1, :connecting))
-    |> connect_mysql()
-    |> case do
+    # If preflight already ran (mysql_conn exists), skip connect+preflight
+    case ensure_connected(state) do
       {:error, reason, state} ->
-        update_status(state, &Status.set_state(&1, {:error, "MySQL connection failed: #{inspect(reason)}"}))
+        update_status(state, &Status.set_state(&1, {:error, reason}))
 
       {:ok, state} ->
-        state
-        |> update_status(&Status.set_state(&1, :running))
-        |> import_cars()
-        |> import_all_car_data()
-        |> finalize()
+        state = update_status(state, &Status.set_state(&1, :running))
+
+        case import_cars(state) do
+          {:error, reason, state} ->
+            update_status(state, &Status.set_state(&1, {:error, reason}))
+
+          {:ok, state} ->
+            case mode_precheck(state) do
+              {:error, reason, state} ->
+                update_status(state, &Status.set_state(&1, {:error, reason}))
+
+              {:ok, state} ->
+                state = import_all_car_data(state)
+
+                if match?({:error, _}, state.status.state) do
+                  state
+                else
+                  finalize(state)
+                end
+            end
+        end
+    end
+  end
+
+  defp ensure_connected(state) do
+    if state.mysql_conn do
+      {:ok, state}
+    else
+      state
+      |> update_status(&Status.set_state(&1, :connecting))
+      |> connect_mysql()
+      |> case do
+        {:error, reason, state} ->
+          {:error, "MySQL connection failed: #{inspect(reason)}", state}
+
+        {:ok, state} ->
+          run_preflight_check(state)
+      end
+    end
+  end
+
+  defp run_preflight_check(state) do
+    Logger.info("Running preflight check on TeslaLogger database...")
+
+    case MysqlReader.preflight_check(state.mysql_conn) do
+      {:ok, car_info} ->
+        Logger.info("Preflight check passed — found #{length(car_info)} car(s)")
+
+        vins_found = Enum.filter(car_info, fn c -> c["vin"] != nil and c["vin"] != "" end)
+        vins_missing = Enum.reject(car_info, fn c -> c["vin"] != nil and c["vin"] != "" end)
+
+        if vins_found != [] do
+          Enum.each(vins_found, fn c ->
+            Logger.info("  Car #{c["id"]}: VIN #{c["vin"]} (#{c["display_name"]})")
+          end)
+        end
+
+        if vins_missing != [] do
+          Enum.each(vins_missing, fn c ->
+            Logger.warning("  Car #{c["id"]}: No VIN found (#{c["display_name"]})")
+          end)
+        end
+
+        state = update_status(state, fn s -> %{s | mysql_car_info: car_info} end)
+        {:ok, state}
+
+      {:error, reason} ->
+        Logger.error("Preflight check failed: #{reason}")
+        {:error, reason, state}
+    end
+  end
+
+  defp mode_precheck(state) do
+    mode = state.status.import_mode
+
+    if mode == :clean do
+      Enum.reduce_while(state.car_mapping, {:ok, state}, fn {_tl_id, car}, {:ok, s} ->
+        case Writer.check_car_has_no_data(car.id) do
+          :ok ->
+            {:cont, {:ok, s}}
+
+          {:error, {:data_exists, counts}} ->
+            counts_str =
+              counts
+              |> Enum.map(fn {k, v} -> "#{k}: #{v}" end)
+              |> Enum.join(", ")
+
+            msg = "Car #{car.vin || car.id} already has data (#{counts_str}). Use a merge mode or empty the database first."
+            Logger.error("Mode precheck failed: #{msg}")
+            {:halt, {:error, msg, s}}
+        end
+      end)
+    else
+      {:ok, state}
     end
   end
 
@@ -98,81 +232,186 @@ defmodule TeslaMate.Import.TeslaLogger do
   end
 
   defp import_cars(state) do
-    state = update_status(state, &Status.start_step(&1, :cars))
     conn = state.mysql_conn
 
     case MysqlReader.read_cars(conn) do
       {:ok, tl_cars} ->
         Logger.info("Found #{length(tl_cars)} car(s) in TeslaLogger")
-        state = update_status(state, fn s -> %{s | car_count: length(tl_cars)} end)
+        car_count = length(tl_cars)
+        state = update_status(state, fn s -> %{s | car_count: car_count} end)
+        state = update_status(state, &Status.start_step(&1, :cars, car_count))
 
         car_mapping =
-          Enum.reduce(tl_cars, %{}, fn tl_car, acc ->
+          Enum.reduce_while(tl_cars, {:ok, %{}}, fn tl_car, {:ok, acc} ->
             tl_car_id = tl_car["id"]
 
             case create_or_find_car(tl_car, state.car_mapping) do
               {:ok, car} ->
                 Logger.info("Mapped TeslaLogger car #{tl_car_id} -> TeslaMate car #{car.id} (#{car.name || car.vin})")
-                Map.put(acc, tl_car_id, car)
+                {:cont, {:ok, Map.put(acc, tl_car_id, car)}}
+
+              {:error, :vin_required} ->
+                msg = "TeslaLogger car #{tl_car_id} (#{tl_car["display_name"]}) has no VIN. Please provide a VIN in the import form."
+                Logger.error(msg)
+                {:halt, {:error, msg}}
 
               {:error, reason} ->
                 Logger.warning("Failed to create car for TeslaLogger car #{tl_car_id}: #{inspect(reason)}")
-                acc
+                {:cont, {:ok, acc}}
             end
           end)
 
-        state = %{state | car_mapping: car_mapping}
-        update_status(state, &Status.complete_step(&1, :cars))
+        case car_mapping do
+          {:ok, mapping} ->
+            state = %{state | car_mapping: mapping}
+            {:ok, update_status(state, &Status.complete_step(&1, :cars))}
+
+          {:error, msg} ->
+            {:error, msg, update_status(state, &Status.fail_step(&1, :cars, msg))}
+        end
 
       {:error, reason} ->
         Logger.error("Failed to read cars: #{inspect(reason)}")
-        update_status(state, &Status.fail_step(&1, :cars, inspect(reason)))
+        {:error, inspect(reason), update_status(state, &Status.fail_step(&1, :cars, inspect(reason)))}
     end
   end
 
   defp import_all_car_data(state) do
     Enum.reduce(state.car_mapping, state, fn {tl_car_id, car}, state ->
-      Logger.info("Importing data for car #{car.id} (TeslaLogger ID: #{tl_car_id})")
-      timezone = state.config[:timezone]
+      # Skip if a previous step already failed
+      if match?({:error, _}, state.status.state) do
+        state
+      else
+        Logger.info("Importing data for car #{car.id} (TeslaLogger ID: #{tl_car_id})")
+        timezone = state.config[:timezone]
 
-      state
-      |> import_positions(tl_car_id, car.id, timezone)
-      |> import_drives(tl_car_id, car.id, timezone)
-      |> import_charging_data(tl_car_id, car.id, timezone)
-      |> import_states(tl_car_id, car.id, timezone)
-      |> import_updates(tl_car_id, car.id, timezone)
+        # Mode C: Pre-delete all overlapping data in FK-safe order BEFORE importing
+        case maybe_pre_delete_overlapping(state, tl_car_id, car.id, timezone) do
+          {:error, reason, state} ->
+            update_status(state, &Status.set_state(&1, {:error, "Pre-deletion failed: #{inspect(reason)}"}))
+
+          {:ok, state} ->
+            state
+            |> import_positions(tl_car_id, car.id, timezone)
+            |> import_drives(tl_car_id, car.id, timezone)
+            |> import_charging_data(tl_car_id, car.id, timezone)
+            |> import_states(tl_car_id, car.id, timezone)
+            |> import_updates(tl_car_id, car.id, timezone)
+        end
+      end
     end)
   end
 
+  defp maybe_pre_delete_overlapping(state, tl_car_id, car_id, timezone) do
+    if state.status.import_mode != :merge_tl_priority do
+      {:ok, state}
+    else
+      Logger.info("Mode C: Pre-deleting overlapping TeslaMate data for car #{car_id}...")
+      conn = state.mysql_conn
+
+      # Read TeslaLogger time ranges to compute what to delete
+      with {:ok, pos_rows} <- MysqlReader.read_positions(conn, tl_car_id),
+           {:ok, drive_rows} <- MysqlReader.read_drives(conn, tl_car_id),
+           {:ok, cp_rows} <- MysqlReader.read_charging_sessions(conn, tl_car_id),
+           {:ok, state_rows} <- MysqlReader.read_states(conn, tl_car_id),
+           {:ok, update_rows} <- MysqlReader.read_updates(conn, tl_car_id) do
+
+        # Compute overall time range from positions
+        pos_dates = Enum.map(pos_rows, fn row -> Mapper.map_position(row, timezone).date end)
+        pos_dates = Enum.reject(pos_dates, &is_nil/1)
+
+        pos_range =
+          if pos_dates != [] do
+            min_d = Enum.min(pos_dates, DateTime)
+            max_d = Enum.max(pos_dates, DateTime)
+            [{min_d, max_d}]
+          else
+            []
+          end
+
+        # Compute ranges from drives, charging processes, states, updates
+        drive_ranges = drive_rows |> Enum.map(fn r -> m = Mapper.map_drive(r, timezone); {m.start_date, m.end_date} end) |> Enum.reject(fn {s, _} -> is_nil(s) end)
+        cp_ranges = cp_rows |> Enum.map(fn r -> m = Mapper.map_charging_process(r, timezone); {m.start_date, m.end_date} end) |> Enum.reject(fn {s, _} -> is_nil(s) end)
+        state_ranges = state_rows |> Enum.map(fn r -> m = Mapper.map_state(r, timezone); {m.start_date, m.end_date} end) |> Enum.reject(fn {s, _} -> is_nil(s) end)
+        update_ranges = update_rows |> Enum.map(fn r -> m = Mapper.map_update(r, timezone); {m.start_date, nil} end) |> Enum.reject(fn {s, _} -> is_nil(s) end)
+
+        all_ranges = pos_range ++ drive_ranges ++ cp_ranges ++ state_ranges ++ update_ranges
+        consolidated = Writer.consolidate_ranges(all_ranges)
+
+        if consolidated != [] do
+          Logger.info("Deleting overlapping TeslaMate data in #{length(consolidated)} time range(s)...")
+          deleted = Writer.delete_overlapping_data(car_id, consolidated)
+          Logger.info("Pre-deletion complete: #{inspect(deleted)}")
+        end
+
+        {:ok, state}
+      else
+        {:error, reason} ->
+          Logger.error("Failed to compute TeslaLogger time ranges for pre-deletion: #{inspect(reason)}")
+          {:error, reason, state}
+      end
+    end
+  end
+
+  defp import_positions(%{status: %{state: {:error, _}}} = state, _, _, _), do: state
   defp import_positions(state, tl_car_id, car_id, timezone) do
     conn = state.mysql_conn
 
     with {:ok, total} <- MysqlReader.count_positions(conn, tl_car_id),
          state = update_status(state, &Status.start_step(&1, :positions, total)),
+         state = update_status(state, &Status.set_phase(&1, :positions, :reading)),
          {:ok, rows} <- MysqlReader.read_positions(conn, tl_car_id) do
 
-      mapped =
-        Enum.map(rows, &Mapper.map_position(&1, timezone))
+      state = update_status(state, &Status.set_phase(&1, :positions, :mapping))
+
+      {mapped, _count} =
+        Enum.map_reduce(rows, 0, fn row, count ->
+          result = Mapper.map_position(row, timezone)
+          new_count = count + 1
+
+          if rem(new_count, 50_000) == 0 do
+            broadcast(update_status(state, &Status.update_step_progress(&1, :positions, new_count)).status)
+          end
+
+          {result, new_count}
+        end)
+
+      state = update_status(state, &Status.set_phase(&1, :positions, :validating))
 
       {valid, errors} = Validator.validate_positions(mapped)
       warnings = Validator.format_warnings(errors)
       state = update_status(state, &Status.add_warnings(&1, warnings))
 
+      # Mode B: filter out positions that already exist in TeslaMate
+      {valid, state} =
+        if state.status.import_mode == :merge_tm_priority do
+          state = update_status(state, &Status.set_phase(&1, :positions, :filtering))
+          existing_set = Writer.load_existing_position_dates(car_id)
+
+          filtered = Enum.reject(valid, fn pos ->
+            MapSet.member?(existing_set, DateTime.to_unix(pos.date, :second))
+          end)
+
+          {filtered, state}
+        else
+          {valid, state}
+        end
+
+      state = update_status(state, &Status.set_phase(&1, :positions, :inserting))
+
       progress_fn = fn imported, _total ->
         broadcast(update_status(state, &Status.update_step_progress(&1, :positions, imported)).status)
       end
 
-      state =
-        case Writer.insert_positions(car_id, valid, progress_fn) do
-          {:ok, new_date_map} ->
-            %{state | date_to_pos_id: Map.merge(state.date_to_pos_id, new_date_map)}
+      case Writer.insert_positions(car_id, valid, progress_fn) do
+        {:ok, new_date_map} ->
+          state = %{state | date_to_pos_id: Map.merge(state.date_to_pos_id, new_date_map)}
+          update_status(state, &Status.complete_step(&1, :positions))
 
-          {:error, reason} ->
-            Logger.error("Position insert failed: #{inspect(reason)}")
-            state
-        end
-
-      update_status(state, &Status.complete_step(&1, :positions))
+        {:error, reason} ->
+          Logger.error("Position insert failed: #{inspect(reason)}")
+          update_status(state, &Status.fail_step(&1, :positions, inspect(reason)))
+      end
     else
       {:error, reason} ->
         Logger.error("Failed to import positions: #{inspect(reason)}")
@@ -180,45 +419,67 @@ defmodule TeslaMate.Import.TeslaLogger do
     end
   end
 
+  defp import_drives(%{status: %{state: {:error, _}}} = state, _, _, _), do: state
   defp import_drives(state, tl_car_id, car_id, timezone) do
     conn = state.mysql_conn
 
     with {:ok, total} <- MysqlReader.count_drives(conn, tl_car_id),
          state = update_status(state, &Status.start_step(&1, :drives, total)),
+         state = update_status(state, &Status.set_phase(&1, :drives, :reading)),
          {:ok, rows} <- MysqlReader.read_drives(conn, tl_car_id) do
 
-      mapped =
-        Enum.map(rows, fn row ->
+      state = update_status(state, &Status.set_phase(&1, :drives, :mapping))
+
+      sorted_pos_array =
+        Writer.build_sorted_array(state.date_to_pos_id, fn {dt, _} -> dt end, fn {dt, _} -> dt end)
+
+      {mapped, _count} =
+        Enum.map_reduce(rows, 0, fn row, count ->
           drive_attrs = Mapper.map_drive(row, timezone)
 
-          # Find positions within this drive's time range
+          # Binary search for positions within drive time range
           drive_positions =
-            state.date_to_pos_id
-            |> Map.keys()
-            |> Enum.filter(fn date ->
-              DateTime.compare(date, drive_attrs.start_date) != :lt and
-                (drive_attrs.end_date == nil or DateTime.compare(date, drive_attrs.end_date) != :gt)
-            end)
-            |> Enum.sort()
+            find_positions_in_range(
+              sorted_pos_array,
+              drive_attrs.start_date,
+              drive_attrs.end_date
+            )
 
-          # We need the actual position data for enrichment, query from DB
           pos_attrs = get_position_attrs_for_dates(drive_positions, state.date_to_pos_id)
-          Mapper.enrich_drive(drive_attrs, pos_attrs)
+          enriched = Mapper.enrich_drive(drive_attrs, pos_attrs)
+
+          new_count = count + 1
+
+          if rem(new_count, 500) == 0 do
+            broadcast(update_status(state, &Status.update_step_progress(&1, :drives, new_count)).status)
+          end
+
+          {enriched, new_count}
         end)
+
+      state = update_status(state, &Status.set_phase(&1, :drives, :validating))
 
       {valid, errors} = Validator.validate_drives(mapped)
       warnings = Validator.format_warnings(errors)
       state = update_status(state, &Status.add_warnings(&1, warnings))
 
-      case Writer.insert_drives(car_id, valid) do
+      {valid, state} = maybe_filter_overlapping(state, :drives, :drives, car_id, valid)
+
+      state = update_status(state, &Status.set_phase(&1, :drives, :inserting))
+
+      drive_progress = fn inserted, _total ->
+        broadcast(update_status(state, &Status.update_step_progress(&1, :drives, inserted)).status)
+      end
+
+      case Writer.insert_drives(car_id, valid, drive_progress) do
         {:ok, drives_with_ids} ->
           Writer.associate_positions_with_drives(drives_with_ids, state.date_to_pos_id)
+          update_status(state, &Status.complete_step(&1, :drives))
 
         {:error, reason} ->
           Logger.error("Drive insert failed: #{inspect(reason)}")
+          update_status(state, &Status.fail_step(&1, :drives, inspect(reason)))
       end
-
-      update_status(state, &Status.complete_step(&1, :drives))
     else
       {:error, reason} ->
         Logger.error("Failed to import drives: #{inspect(reason)}")
@@ -226,15 +487,19 @@ defmodule TeslaMate.Import.TeslaLogger do
     end
   end
 
+  defp import_charging_data(%{status: %{state: {:error, _}}} = state, _, _, _), do: state
   defp import_charging_data(state, tl_car_id, car_id, timezone) do
     conn = state.mysql_conn
 
     # First: import charging_processes
     with {:ok, cp_total} <- MysqlReader.count_charging_sessions(conn, tl_car_id),
          state = update_status(state, &Status.start_step(&1, :charging_processes, cp_total)),
+         state = update_status(state, &Status.set_phase(&1, :charging_processes, :reading)),
          {:ok, cp_rows} <- MysqlReader.read_charging_sessions(conn, tl_car_id),
          {:ok, c_total} <- MysqlReader.count_charges(conn, tl_car_id),
          {:ok, c_rows} <- MysqlReader.read_charges(conn, tl_car_id) do
+
+      state = update_status(state, &Status.set_phase(&1, :charging_processes, :mapping))
 
       # Map charges first (need them for enriching charging_processes)
       mapped_charges =
@@ -264,6 +529,8 @@ defmodule TeslaMate.Import.TeslaLogger do
         |> Enum.with_index()
         |> Enum.map(fn {cp, idx} -> Map.put(cp, :_idx, idx) end)
 
+      state = update_status(state, &Status.set_phase(&1, :charging_processes, :validating))
+
       cps_for_validation = Enum.map(indexed_cps, &Map.drop(&1, [:_tl_id, :_idx]))
 
       {_valid_cps, cp_errors} = Validator.validate_charging_processes(cps_for_validation)
@@ -286,33 +553,65 @@ defmodule TeslaMate.Import.TeslaLogger do
           {cp._tl_id, Map.drop(cp, [:_tl_id, :_idx])}
         end)
 
-      tl_cs_id_to_cp_id =
-        case Writer.insert_charging_processes(car_id, valid_cps_with_tl_ids, state.date_to_pos_id) do
-          {:ok, mapping} -> mapping
-          {:error, reason} ->
-            Logger.error("Charging process insert failed: #{inspect(reason)}")
-            %{}
+      # Mode B: filter out charging processes that overlap with existing ones
+      {valid_cps_with_tl_ids, state} =
+        if state.status.import_mode == :merge_tm_priority do
+          state = update_status(state, &Status.set_phase(&1, :charging_processes, :filtering))
+          existing = Writer.load_existing_ranges(car_id, :charging_processes)
+
+          filtered =
+            Enum.filter(valid_cps_with_tl_ids, fn {_tl_id, cp} ->
+              Writer.filter_non_overlapping([cp], existing) != []
+            end)
+
+          {filtered, state}
+        else
+          {valid_cps_with_tl_ids, state}
         end
 
-      state = update_status(state, &Status.complete_step(&1, :charging_processes))
+      state = update_status(state, &Status.set_phase(&1, :charging_processes, :inserting))
 
-      # Now import charges
-      state = update_status(state, &Status.start_step(&1, :charges, c_total))
-
-      {valid_charges, c_errors} = Validator.validate_charges(mapped_charges)
-      warnings = Validator.format_warnings(c_errors)
-      state = update_status(state, &Status.add_warnings(&1, warnings))
-
-      progress_fn = fn imported, _total ->
-        broadcast(update_status(state, &Status.update_step_progress(&1, :charges, imported)).status)
+      cp_progress = fn inserted, _total ->
+        broadcast(update_status(state, &Status.update_step_progress(&1, :charging_processes, inserted)).status)
       end
 
-      case Writer.insert_charges(valid_charges, tl_cs_id_to_cp_id, progress_fn) do
-        {:ok, _count} -> :ok
-        {:error, reason} -> Logger.error("Charge insert failed: #{inspect(reason)}")
-      end
+      {tl_cs_id_to_cp_id, state} =
+        case Writer.insert_charging_processes(car_id, valid_cps_with_tl_ids, state.date_to_pos_id, cp_progress) do
+          {:ok, mapping} ->
+            {mapping, update_status(state, &Status.complete_step(&1, :charging_processes))}
 
-      update_status(state, &Status.complete_step(&1, :charges))
+          {:error, reason} ->
+            Logger.error("Charging process insert failed: #{inspect(reason)}")
+            {%{}, update_status(state, &Status.fail_step(&1, :charging_processes, inspect(reason)))}
+        end
+
+      # Now import charges (skip if CP insert failed)
+      if tl_cs_id_to_cp_id == %{} and valid_cps_with_tl_ids != [] do
+        Logger.warning("Skipping charge import because charging process insert failed")
+        update_status(state, &Status.fail_step(&1, :charges, "Skipped: charging process insert failed"))
+      else
+        state = update_status(state, &Status.start_step(&1, :charges, c_total))
+        state = update_status(state, &Status.set_phase(&1, :charges, :validating))
+
+        {valid_charges, c_errors} = Validator.validate_charges(mapped_charges)
+        warnings = Validator.format_warnings(c_errors)
+        state = update_status(state, &Status.add_warnings(&1, warnings))
+
+        state = update_status(state, &Status.set_phase(&1, :charges, :inserting))
+
+        charge_progress = fn imported, _total ->
+          broadcast(update_status(state, &Status.update_step_progress(&1, :charges, imported)).status)
+        end
+
+        case Writer.insert_charges(valid_charges, tl_cs_id_to_cp_id, charge_progress) do
+          {:ok, _count} ->
+            update_status(state, &Status.complete_step(&1, :charges))
+
+          {:error, reason} ->
+            Logger.error("Charge insert failed: #{inspect(reason)}")
+            update_status(state, &Status.fail_step(&1, :charges, inspect(reason)))
+        end
+      end
     else
       {:error, reason} ->
         Logger.error("Failed to import charging data: #{inspect(reason)}")
@@ -323,65 +622,76 @@ defmodule TeslaMate.Import.TeslaLogger do
   end
 
   defp import_states(state, tl_car_id, car_id, timezone) do
-    conn = state.mysql_conn
-
-    with {:ok, total} <- MysqlReader.count_states(conn, tl_car_id),
-         state = update_status(state, &Status.start_step(&1, :states, total)),
-         {:ok, rows} <- MysqlReader.read_states(conn, tl_car_id) do
-
-      mapped = Enum.map(rows, &Mapper.map_state(&1, timezone))
-
-      # Filter out invalid states
-      valid = Enum.filter(mapped, &(&1.state != nil and &1.start_date != nil))
-
-      case Writer.insert_states(car_id, valid) do
-        {:ok, count} ->
-          Logger.info("Inserted #{count} states for car #{car_id}")
-
-        {:error, reason} ->
-          Logger.error("State insert failed: #{inspect(reason)}")
-      end
-
-      update_status(state, &Status.complete_step(&1, :states))
-    else
-      {:error, reason} ->
-        Logger.error("Failed to import states: #{inspect(reason)}")
-        update_status(state, &Status.fail_step(&1, :states, inspect(reason)))
-    end
+    import_simple_entity(state, :states, %{
+      count_fn: fn conn -> MysqlReader.count_states(conn, tl_car_id) end,
+      read_fn: fn conn -> MysqlReader.read_states(conn, tl_car_id) end,
+      map_fn: fn rows -> Enum.map(rows, &Mapper.map_state(&1, timezone)) end,
+      filter_fn: fn mapped -> Enum.filter(mapped, &(&1.state != nil and &1.start_date != nil)) end,
+      insert_fn: fn valid, progress -> Writer.insert_states(car_id, valid, progress) end,
+      merge_entity: :states,
+      car_id: car_id
+    })
   end
 
   defp import_updates(state, tl_car_id, car_id, timezone) do
+    import_simple_entity(state, :updates, %{
+      count_fn: fn conn -> MysqlReader.count_updates(conn, tl_car_id) end,
+      read_fn: fn conn -> MysqlReader.read_updates(conn, tl_car_id) end,
+      map_fn: fn rows -> rows |> Enum.map(&Mapper.map_update(&1, timezone)) |> Mapper.add_update_end_dates() end,
+      filter_fn: fn mapped -> mapped end,
+      insert_fn: fn valid, progress -> Writer.insert_updates(car_id, valid, progress) end,
+      merge_entity: :updates,
+      car_id: car_id
+    })
+  end
+
+  defp import_simple_entity(%{status: %{state: {:error, _}}} = state, _step, _opts), do: state
+
+  defp import_simple_entity(state, step, opts) do
     conn = state.mysql_conn
 
-    with {:ok, total} <- MysqlReader.count_updates(conn, tl_car_id),
-         state = update_status(state, &Status.start_step(&1, :updates, total)),
-         {:ok, rows} <- MysqlReader.read_updates(conn, tl_car_id) do
+    with {:ok, total} <- opts.count_fn.(conn),
+         state = update_status(state, &Status.start_step(&1, step, total)),
+         state = update_status(state, &Status.set_phase(&1, step, :reading)),
+         {:ok, rows} <- opts.read_fn.(conn) do
 
-      mapped =
-        rows
-        |> Enum.map(&Mapper.map_update(&1, timezone))
-        |> Mapper.add_update_end_dates()
+      state = update_status(state, &Status.set_phase(&1, step, :mapping))
+      valid = rows |> opts.map_fn.() |> opts.filter_fn.()
 
-      case Writer.insert_updates(car_id, mapped) do
-        {:ok, count} ->
-          Logger.info("Inserted #{count} updates for car #{car_id}")
+      {valid, state} = maybe_filter_overlapping(state, step, opts.merge_entity, opts.car_id, valid)
 
-        {:error, reason} ->
-          Logger.error("Update insert failed: #{inspect(reason)}")
+      state = update_status(state, &Status.set_phase(&1, step, :inserting))
+
+      progress_fn = fn inserted, _total ->
+        broadcast(update_status(state, &Status.update_step_progress(&1, step, inserted)).status)
       end
 
-      update_status(state, &Status.complete_step(&1, :updates))
+      case opts.insert_fn.(valid, progress_fn) do
+        {:ok, _count} -> update_status(state, &Status.complete_step(&1, step))
+        {:error, reason} -> update_status(state, &Status.fail_step(&1, step, inspect(reason)))
+      end
     else
-      {:error, reason} ->
-        Logger.error("Failed to import updates: #{inspect(reason)}")
-        update_status(state, &Status.fail_step(&1, :updates, inspect(reason)))
+      {:error, reason} -> update_status(state, &Status.fail_step(&1, step, inspect(reason)))
+    end
+  end
+
+  defp maybe_filter_overlapping(state, step, entity, car_id, valid) do
+    if state.status.import_mode == :merge_tm_priority do
+      state = update_status(state, &Status.set_phase(&1, step, :filtering))
+      existing = Writer.load_existing_ranges(car_id, entity)
+      {Writer.filter_non_overlapping(valid, existing), state}
+    else
+      {valid, state}
     end
   end
 
   defp finalize(state) do
     # Trigger geocoding
     state = update_status(state, &Status.start_step(&1, :geocoding))
-    :ok = Repair.trigger_run()
+    case Repair.trigger_run() do
+      :ok -> :ok
+      error -> Logger.warning("Repair.trigger_run returned: #{inspect(error)}")
+    end
     state = update_status(state, &Status.complete_step(&1, :geocoding))
 
     # Run post-import validation
@@ -396,8 +706,6 @@ defmodule TeslaMate.Import.TeslaLogger do
   end
 
   defp run_post_import_validation(state) do
-    import Ecto.Query
-
     Enum.reduce(state.car_mapping, state, fn {_tl_id, car}, state ->
       # Count positions without drive_id
       orphan_positions =
@@ -418,20 +726,23 @@ defmodule TeslaMate.Import.TeslaLogger do
 
   defp create_or_find_car(tl_car, user_mapping) do
     tl_car_id = tl_car["id"]
-    vin = tl_car["vin"]
+    mysql_vin = tl_car["vin"]
     display_name = tl_car["display_name"]
 
     # Check if user provided mapping for this car
     user_car_info = Map.get(user_mapping, tl_car_id, %{})
 
-    vin = user_car_info[:vin] || vin
+    # Priority: user VIN > MySQL VIN
+    vin = user_car_info[:vin] || mysql_vin
     eid = user_car_info[:eid] || tl_car_id * 1000
     vid = user_car_info[:vid] || tl_car_id * 1000 + 1
 
-    # Try to find existing car by VIN
+    # VIN is required — abort if neither MySQL nor user provides one
+    vin = if vin in [nil, ""], do: nil, else: vin
+
     case vin do
       nil ->
-        create_import_car(eid, vid, "TeslaLogger_#{tl_car_id}", display_name)
+        {:error, :vin_required}
 
       vin ->
         case Log.get_car_by(vin: vin) do
@@ -457,14 +768,17 @@ defmodule TeslaMate.Import.TeslaLogger do
         # Disable API polling for imported cars
         car = Repo.preload(car, :settings)
 
-        car.settings
-        |> CarSettings.changeset(%{
-          suspend_min: 0,
-          suspend_after_idle_min: 99999,
-          use_streaming_api: false,
-          enabled: false
-        })
-        |> Repo.update()
+        case car.settings
+             |> CarSettings.changeset(%{
+               suspend_min: 0,
+               suspend_after_idle_min: 99999,
+               use_streaming_api: false,
+               enabled: false
+             })
+             |> Repo.update() do
+          {:ok, _settings} -> :ok
+          {:error, reason} -> Logger.warning("Failed to update car settings: #{inspect(reason)}")
+        end
 
         {:ok, car}
 
@@ -476,8 +790,6 @@ defmodule TeslaMate.Import.TeslaLogger do
   ## Helpers
 
   defp get_position_attrs_for_dates(dates, date_to_pos_id) do
-    import Ecto.Query
-
     pos_ids =
       dates
       |> Enum.map(&Map.get(date_to_pos_id, &1))
@@ -501,6 +813,12 @@ defmodule TeslaMate.Import.TeslaLogger do
         )
         |> Repo.all()
     end
+  end
+
+  defp find_positions_in_range(_sorted_pos_array, nil, _end_date), do: []
+
+  defp find_positions_in_range(sorted_pos_array, start_date, end_date) do
+    Writer.find_in_sorted_array(sorted_pos_array, start_date, end_date)
   end
 
   defp update_status(state, fun) do

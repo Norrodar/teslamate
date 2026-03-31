@@ -5,10 +5,12 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
 
   @doc "Maps a TeslaLogger pos row to TeslaMate position attrs."
   def map_position(row, timezone) do
+    {lat, lng} = sanitize_coords(row["lat"], row["lng"])
+
     %{
       date: to_utc(row["Datum"], timezone),
-      latitude: to_decimal(row["lat"]),
-      longitude: to_decimal(row["lng"]),
+      latitude: to_decimal(lat),
+      longitude: to_decimal(lng),
       speed: to_integer(row["speed"]),
       power: to_integer(row["power"]),
       odometer: to_float(row["odometer"]),
@@ -46,16 +48,7 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       [first | _] = all ->
         last = List.last(all)
 
-        inside_temps =
-          all
-          |> Enum.map(& &1.inside_temp)
-          |> Enum.reject(&is_nil/1)
-
-        inside_temp_avg =
-          case inside_temps do
-            [] -> nil
-            temps -> Decimal.div(Enum.reduce(temps, Decimal.new(0), &Decimal.add/2), Decimal.new(length(temps)))
-          end
+        inside_temp_avg = decimal_avg(all, & &1.inside_temp)
 
         Map.merge(drive_attrs, %{
           start_km: first.odometer,
@@ -92,15 +85,15 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
 
   @doc "Maps a TeslaLogger chargingstate row to TeslaMate charging_process attrs."
   def map_charging_process(row, timezone) do
+    start_date = to_utc(row["StartDate"], timezone)
+    end_date = to_utc(row["EndDate"], timezone)
+
     %{
-      start_date: to_utc(row["StartDate"], timezone),
-      end_date: to_utc(row["EndDate"], timezone),
+      start_date: start_date,
+      end_date: end_date,
       charge_energy_added: to_decimal(row["charge_energy_added"]),
       cost: to_decimal(row["cost_total"]),
-      duration_min: duration_minutes(
-        to_utc(row["StartDate"], timezone),
-        to_utc(row["EndDate"], timezone)
-      )
+      duration_min: duration_minutes(start_date, end_date)
     }
   end
 
@@ -115,16 +108,7 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       [first | _] = all ->
         last = List.last(all)
 
-        outside_temps =
-          all
-          |> Enum.map(& &1.outside_temp)
-          |> Enum.reject(&is_nil/1)
-
-        outside_temp_avg =
-          case outside_temps do
-            [] -> nil
-            temps -> Decimal.div(Enum.reduce(temps, Decimal.new(0), &Decimal.add/2), Decimal.new(length(temps)))
-          end
+        outside_temp_avg = decimal_avg(all, & &1.outside_temp)
 
         Map.merge(cp_attrs, %{
           start_battery_level: first.battery_level,
@@ -167,6 +151,20 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
 
   ## Private
 
+  defp decimal_avg(records, field_fn) do
+    values =
+      records
+      |> Enum.map(field_fn)
+      |> Enum.reject(&is_nil/1)
+
+    case values do
+      [] -> nil
+      vals ->
+        sum = Enum.reduce(vals, Decimal.new(0), &Decimal.add/2)
+        Decimal.round(Decimal.div(sum, Decimal.new(length(vals))), 2)
+    end
+  end
+
   defp map_state_value(state) when is_binary(state) do
     case String.downcase(state) do
       "online" -> :online
@@ -187,40 +185,27 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
 
   defp to_utc(%NaiveDateTime{} = ndt, timezone) do
     case DateTime.from_naive(ndt, timezone) do
-      {:ok, dt} ->
-        case DateTime.shift_zone(dt, "Etc/UTC") do
-          {:ok, utc} -> DateTime.truncate(utc, :microsecond)
-          {:error, _} -> DateTime.truncate(dt, :microsecond)
-        end
-
-      {:ambiguous, dt, _} ->
-        Logger.debug("Ambiguous time during DST transition: #{ndt} in #{timezone}, using first")
-        case DateTime.shift_zone(dt, "Etc/UTC") do
-          {:ok, utc} -> DateTime.truncate(utc, :microsecond)
-          {:error, _} -> DateTime.truncate(dt, :microsecond)
-        end
-
-      {:gap, _, dt} ->
-        Logger.debug("Gap time during DST transition: #{ndt} in #{timezone}, using after")
-        case DateTime.shift_zone(dt, "Etc/UTC") do
-          {:ok, utc} -> DateTime.truncate(utc, :microsecond)
-          {:error, _} -> DateTime.truncate(dt, :microsecond)
-        end
-
+      {:ok, dt} -> shift_to_utc(dt)
+      {:ambiguous, dt, _} -> shift_to_utc(dt)
+      {:gap, _, dt} -> shift_to_utc(dt)
       {:error, reason} ->
         Logger.warning("Failed to convert #{ndt} in timezone #{timezone}: #{inspect(reason)}")
         nil
     end
   end
 
-  defp to_utc(%DateTime{} = dt, _timezone) do
+  defp to_utc(%DateTime{} = dt, _timezone), do: shift_to_utc(dt)
+
+  defp to_utc(_, _timezone), do: nil
+
+  defp shift_to_utc(dt) do
     case DateTime.shift_zone(dt, "Etc/UTC") do
-      {:ok, utc} -> DateTime.truncate(utc, :microsecond)
-      {:error, _} -> DateTime.truncate(dt, :microsecond)
+      {:ok, utc} -> ensure_usec(utc)
+      {:error, _} -> ensure_usec(dt)
     end
   end
 
-  defp to_utc(_, _timezone), do: nil
+  defp ensure_usec(%DateTime{microsecond: {us, _}} = dt), do: %{dt | microsecond: {us, 6}}
 
   defp to_decimal(nil), do: nil
   defp to_decimal(%Decimal{} = d), do: d
@@ -281,6 +266,17 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
   end
 
   defp to_boolean(_), do: nil
+
+  # Filter out (0, 0) coordinates — GPS error when no signal (e.g. underground parking)
+  defp sanitize_coords(lat, lng) when is_number(lat) and is_number(lng) do
+    if lat == 0 and lng == 0 do
+      {nil, nil}
+    else
+      {lat, lng}
+    end
+  end
+
+  defp sanitize_coords(lat, lng), do: {lat, lng}
 
   defp distance(nil, _), do: nil
   defp distance(_, nil), do: nil
