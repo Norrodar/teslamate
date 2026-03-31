@@ -16,6 +16,7 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       odometer: to_float(row["odometer"]),
       elevation: to_integer(row["altitude"]),
       battery_level: to_integer(row["battery_level"]),
+      usable_battery_level: to_integer(row["usable_battery_level"]),
       inside_temp: to_decimal(row["inside_temp"]),
       outside_temp: to_decimal(row["outside_temp"]),
       battery_heater: to_boolean(row["battery_heater"]),
@@ -24,11 +25,79 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
     }
   end
 
+  @doc """
+  Merges TPMS data into mapped positions. Both lists must be sorted by date ASC.
+  Each position gets the most recent TPMS reading at or before its timestamp.
+  TPMS pressures are in bar (TeslaLogger stores bar).
+  """
+  def merge_tpms(positions, []), do: positions
+
+  def merge_tpms(positions, tpms_rows) do
+    # Convert TPMS rows to sorted list of {unix_seconds, pressures_map}
+    tpms_sorted =
+      tpms_rows
+      |> Enum.map(fn row ->
+        # Datum from MySQL is already a DateTime or NaiveDateTime
+        unix = datetime_to_unix(row["Datum"])
+
+        pressures = %{
+          tpms_pressure_fl: to_decimal(row["tpms_fl"]),
+          tpms_pressure_fr: to_decimal(row["tpms_fr"]),
+          tpms_pressure_rl: to_decimal(row["tpms_rl"]),
+          tpms_pressure_rr: to_decimal(row["tpms_rr"])
+        }
+
+        {unix, pressures}
+      end)
+      |> Enum.reject(fn {unix, _} -> unix == nil end)
+
+    # Merge: walk both sorted lists in O(n+m)
+    do_merge_tpms(positions, tpms_sorted, nil)
+  end
+
+  defp do_merge_tpms([], _tpms, _current), do: []
+
+  defp do_merge_tpms([pos | rest_pos], tpms, current_pressures) do
+    pos_unix = datetime_to_unix(pos.date)
+
+    # Advance TPMS cursor to find the latest reading <= pos timestamp
+    {new_current, remaining_tpms} = advance_tpms(tpms, pos_unix, current_pressures)
+
+    enriched =
+      if new_current do
+        Map.merge(pos, new_current)
+      else
+        pos
+      end
+
+    [enriched | do_merge_tpms(rest_pos, remaining_tpms, new_current)]
+  end
+
+  defp advance_tpms([{tpms_unix, pressures} | rest], pos_unix, _current)
+       when tpms_unix <= pos_unix do
+    advance_tpms(rest, pos_unix, pressures)
+  end
+
+  defp advance_tpms(tpms, _pos_unix, current), do: {current, tpms}
+
+  defp datetime_to_unix(nil), do: nil
+  defp datetime_to_unix(%DateTime{} = dt), do: DateTime.to_unix(dt, :second)
+
+  defp datetime_to_unix(%NaiveDateTime{} = ndt) do
+    ndt |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix(:second)
+  end
+
+  defp datetime_to_unix(_), do: nil
+
   @doc "Maps a TeslaLogger drivestate row to TeslaMate drive attrs."
   def map_drive(row, timezone) do
+    start_date = to_utc(row["StartDate"], timezone)
+    end_date = to_utc(row["EndDate"], timezone)
+    end_date = ensure_end_after_start(start_date, end_date)
+
     %{
-      start_date: to_utc(row["StartDate"], timezone),
-      end_date: to_utc(row["EndDate"], timezone),
+      start_date: start_date,
+      end_date: end_date,
       outside_temp_avg: to_decimal(row["outside_temp_avg"]),
       speed_max: to_integer(row["speed_max"]),
       power_max: to_integer(row["power_max"]),
@@ -66,6 +135,8 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
 
   @doc "Maps a TeslaLogger charging row to TeslaMate charge attrs."
   def map_charge(row, timezone) do
+    dc? = is_dc_charger?(row)
+
     %{
       date: to_utc(row["Datum"], timezone),
       battery_level: to_integer(row["battery_level"]),
@@ -73,13 +144,17 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       charge_energy_added: to_decimal(row["charge_energy_added"]),
       charger_power: to_integer(row["charger_power"]),
       ideal_battery_range_km: to_decimal(row["ideal_battery_range_km"]),
-      rated_battery_range_km: to_decimal(row["rated_battery_range_km"]),
+      rated_battery_range_km: to_decimal(row["battery_range_km"]),
       charger_voltage: to_integer(row["charger_voltage"]),
       charger_phases: to_integer(row["charger_phases"]),
       charger_actual_current: to_integer(row["charger_actual_current"]),
       outside_temp: to_decimal(row["outside_temp"]),
       charger_pilot_current: to_integer(row["charger_pilot_current"]),
-      battery_heater: to_boolean(row["battery_heater"])
+      battery_heater: to_boolean(row["battery_heater"]),
+      fast_charger_present: dc?,
+      fast_charger_brand: if(dc?, do: non_empty_string(row["fast_charger_brand"])),
+      fast_charger_type: if(dc?, do: non_empty_string(row["fast_charger_type"])),
+      conn_charge_cable: non_empty_string(row["conn_charge_cable"])
     }
   end
 
@@ -87,6 +162,7 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
   def map_charging_process(row, timezone) do
     start_date = to_utc(row["StartDate"], timezone)
     end_date = to_utc(row["EndDate"], timezone)
+    end_date = ensure_end_after_start(start_date, end_date)
 
     %{
       start_date: start_date,
@@ -126,6 +202,37 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       start_date: to_utc(row["StartDate"], timezone),
       version: row["version"]
     }
+  end
+
+  @doc """
+  Consolidates consecutive updates with the same version into a single entry.
+  Keeps the earliest start_date for each version run.
+  Must be called BEFORE add_update_end_dates.
+  """
+  def consolidate_updates(updates) do
+    updates
+    |> Enum.chunk_while(
+      nil,
+      fn update, acc ->
+        case acc do
+          nil ->
+            {:cont, update}
+
+          prev when prev.version == update.version ->
+            # Same version — keep earliest start_date (prev is already earlier since list is sorted)
+            {:cont, prev}
+
+          prev ->
+            # Different version — emit previous, start new accumulator
+            {:cont, prev, update}
+        end
+      end,
+      fn
+        nil -> {:cont, nil}
+        acc -> {:cont, acc, nil}
+      end
+    )
+    |> Enum.reject(&is_nil/1)
   end
 
   @doc """
@@ -200,8 +307,12 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
 
   defp shift_to_utc(dt) do
     case DateTime.shift_zone(dt, "Etc/UTC") do
-      {:ok, utc} -> ensure_usec(utc)
-      {:error, _} -> ensure_usec(dt)
+      {:ok, utc} ->
+        ensure_usec(utc)
+
+      {:error, reason} ->
+        Logger.warning("Failed to shift #{inspect(dt)} to UTC: #{inspect(reason)}, using as-is")
+        ensure_usec(dt)
     end
   end
 
@@ -268,15 +379,61 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
   defp to_boolean(_), do: nil
 
   # Filter out (0, 0) coordinates — GPS error when no signal (e.g. underground parking)
-  defp sanitize_coords(lat, lng) when is_number(lat) and is_number(lng) do
-    if lat == 0 and lng == 0 do
+  # Also handles string inputs from MySQL driver by converting first
+  defp sanitize_coords(lat, lng) do
+    lat_num = to_number_for_coord(lat)
+    lng_num = to_number_for_coord(lng)
+
+    if (lat_num == 0 and lng_num == 0) or lat_num == nil or lng_num == nil do
       {nil, nil}
     else
-      {lat, lng}
+      {lat_num, lng_num}
     end
   end
 
-  defp sanitize_coords(lat, lng), do: {lat, lng}
+  defp to_number_for_coord(val) when is_number(val), do: val
+  defp to_number_for_coord(%Decimal{} = d), do: Decimal.to_float(d)
+
+  defp to_number_for_coord(val) when is_binary(val) do
+    case Float.parse(val) do
+      {f, _} -> f
+      :error -> nil
+    end
+  end
+
+  defp to_number_for_coord(_), do: nil
+
+  # Ensures end_date is strictly after start_date. TeslaLogger often records
+  # very short drives/charges where start == end (car briefly wakes up).
+  defp ensure_end_after_start(nil, end_date), do: end_date
+  defp ensure_end_after_start(_start_date, nil), do: nil
+
+  defp ensure_end_after_start(%DateTime{} = start_date, %DateTime{} = end_date) do
+    if DateTime.compare(start_date, end_date) != :lt do
+      start_date |> DateTime.add(1, :second) |> ensure_usec()
+    else
+      end_date
+    end
+  end
+
+  # Known DC fast charger types from Tesla API
+  @dc_charger_types ~w(Combo CCS CHAdeMO Tesla SuperCharger)
+
+  defp is_dc_charger?(row) do
+    type = row["fast_charger_type"]
+    brand = row["fast_charger_brand"]
+
+    cond do
+      type != nil and type != "" and type in @dc_charger_types -> true
+      brand != nil and String.contains?(brand, "Tesla") -> true
+      true -> false
+    end
+  end
+
+  defp non_empty_string(nil), do: nil
+  defp non_empty_string(""), do: nil
+  defp non_empty_string(s) when is_binary(s), do: s
+  defp non_empty_string(_), do: nil
 
   defp distance(nil, _), do: nil
   defp distance(_, nil), do: nil

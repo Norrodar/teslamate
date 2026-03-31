@@ -1,8 +1,6 @@
 defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
   @moduledoc false
 
-  require Logger
-
   @doc """
   Connects to the TeslaLogger MySQL database.
   Returns {:ok, pid} or {:error, reason}.
@@ -15,6 +13,77 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
       password: config[:password],
       database: config[:database]
     )
+  end
+
+  @required_tables ~w(cars pos drivestate charging chargingstate state car_version)
+
+  @doc """
+  Checks that the MySQL database is a valid TeslaLogger database:
+  - All required tables exist
+  - At least one car is present
+  - At least one position row exists
+  - Reads car info (id, vin, display_name) for the UI
+  Returns {:ok, car_info_list} or {:error, reason}.
+  """
+  def preflight_check(conn) do
+    with :ok <- check_required_tables(conn),
+         :ok <- check_has_cars(conn),
+         :ok <- check_has_data(conn),
+         {:ok, car_info} <- read_car_info(conn) do
+      {:ok, car_info}
+    end
+  end
+
+  defp read_car_info(conn) do
+    case MyXQL.query(conn, "SELECT id, vin, display_name FROM cars") do
+      {:ok, %MyXQL.Result{rows: rows, columns: columns}} ->
+        {:ok, rows_to_maps(columns, rows)}
+
+      {:error, reason} ->
+        {:error, "Failed to read car info: #{inspect(reason)}"}
+    end
+  end
+
+  defp check_required_tables(conn) do
+    case MyXQL.query(conn, "SHOW TABLES") do
+      {:ok, %MyXQL.Result{rows: rows}} ->
+        existing = rows |> List.flatten() |> MapSet.new()
+        missing = Enum.reject(@required_tables, &MapSet.member?(existing, &1))
+
+        case missing do
+          [] -> :ok
+          _ -> {:error, "Missing required tables: #{Enum.join(missing, ", ")}"}
+        end
+
+      {:error, reason} ->
+        {:error, "Failed to list tables: #{inspect(reason)}"}
+    end
+  end
+
+  defp check_has_cars(conn) do
+    case MyXQL.query(conn, "SELECT COUNT(*) FROM cars") do
+      {:ok, %MyXQL.Result{rows: [[0]]}} ->
+        {:error, "No cars found in TeslaLogger database"}
+
+      {:ok, %MyXQL.Result{rows: [[_count]]}} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Failed to query cars table: #{inspect(reason)}"}
+    end
+  end
+
+  defp check_has_data(conn) do
+    case MyXQL.query(conn, "SELECT COUNT(*) FROM pos LIMIT 1") do
+      {:ok, %MyXQL.Result{rows: [[0]]}} ->
+        {:error, "No position data found in TeslaLogger database"}
+
+      {:ok, %MyXQL.Result{rows: [[_count]]}} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Failed to query pos table: #{inspect(reason)}"}
+    end
   end
 
   @doc "Reads all cars from TeslaLogger."
@@ -32,14 +101,14 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
   def read_positions(conn, car_id) do
     query = """
     SELECT id, Datum, lat, lng, speed, power, odometer, altitude,
-           battery_level, inside_temp, outside_temp, battery_heater,
-           battery_range_km, ideal_battery_range_km
+           battery_level, usable_battery_level, inside_temp, outside_temp,
+           battery_heater, battery_range_km, ideal_battery_range_km
     FROM pos
     WHERE CarID = ?
     ORDER BY Datum ASC
     """
 
-    stream_query(conn, query, [car_id])
+    fetch_all(conn, query, [car_id])
   end
 
   @doc "Counts positions for a given car."
@@ -57,7 +126,7 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     ORDER BY StartDate ASC
     """
 
-    stream_query(conn, query, [car_id])
+    fetch_all(conn, query, [car_id])
   end
 
   @doc "Counts drives for a given car."
@@ -70,11 +139,14 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     query = """
     SELECT c.id, c.Datum, c.battery_level, c.usable_battery_level,
            c.charge_energy_added,
-           c.charger_power, c.ideal_battery_range_km, c.rated_battery_range_km,
+           c.charger_power, c.ideal_battery_range_km,
+           c.battery_range_km,
            c.charger_voltage,
            c.charger_phases, c.charger_actual_current, c.outside_temp,
            c.charger_pilot_current, c.battery_heater,
-           cs.id AS chargingstate_id
+           cs.id AS chargingstate_id,
+           cs.fast_charger_brand, cs.fast_charger_type,
+           cs.conn_charge_cable
     FROM charging c
     LEFT JOIN chargingstate cs ON c.Datum BETWEEN cs.StartDate AND cs.EndDate
       AND cs.CarID = c.CarID
@@ -82,7 +154,7 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     ORDER BY c.Datum ASC
     """
 
-    stream_query(conn, query, [car_id])
+    fetch_all(conn, query, [car_id])
   end
 
   @doc "Counts charges for a given car."
@@ -102,7 +174,7 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     ORDER BY StartDate ASC
     """
 
-    stream_query(conn, query, [car_id])
+    fetch_all(conn, query, [car_id])
   end
 
   @doc "Counts charging sessions for a given car."
@@ -119,7 +191,7 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     ORDER BY StartDate ASC
     """
 
-    stream_query(conn, query, [car_id])
+    fetch_all(conn, query, [car_id])
   end
 
   @doc "Counts states for a given car."
@@ -136,12 +208,33 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     ORDER BY StartDate ASC
     """
 
-    stream_query(conn, query, [car_id])
+    fetch_all(conn, query, [car_id])
   end
 
   @doc "Counts updates for a given car."
   def count_updates(conn, car_id) do
     count_query(conn, "SELECT COUNT(*) FROM car_version WHERE CarID = ?", [car_id])
+  end
+
+  @doc "Reads TPMS data for a given car, pivoted by tire ID, ordered by timestamp."
+  def read_tpms(conn, car_id) do
+    query = """
+    SELECT Datum,
+           MAX(CASE WHEN TireId = 1 THEN Pressure END) AS tpms_fl,
+           MAX(CASE WHEN TireId = 2 THEN Pressure END) AS tpms_fr,
+           MAX(CASE WHEN TireId = 3 THEN Pressure END) AS tpms_rl,
+           MAX(CASE WHEN TireId = 4 THEN Pressure END) AS tpms_rr
+    FROM TPMS
+    WHERE CarId = ?
+    GROUP BY Datum
+    ORDER BY Datum ASC
+    """
+
+    case fetch_all(conn, query, [car_id]) do
+      {:ok, _} = result -> result
+      {:error, %MyXQL.Error{mysql: %{code: 1146}}} -> {:ok, []}
+      {:error, _} = err -> err
+    end
   end
 
   @doc "Reads the position row for a given TeslaLogger pos ID."
@@ -162,7 +255,7 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
 
   ## Private
 
-  defp stream_query(conn, query, params) do
+  defp fetch_all(conn, query, params) do
     case MyXQL.query(conn, query, params, timeout: :infinity) do
       {:ok, %MyXQL.Result{rows: rows, columns: columns}} ->
         {:ok, rows_to_maps(columns, rows)}

@@ -3,7 +3,7 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
 
   import Ecto.Query
 
-  alias TeslaMate.Log.{Position, Drive, ChargingProcess, Charge, State, Update}
+  alias TeslaMate.Log.{Car, Position, Drive, ChargingProcess, Charge, State, Update}
   alias TeslaMate.Repo
 
   require Logger
@@ -33,7 +33,9 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
             :battery_heater, :battery_heater_on, :battery_heater_no_power,
             :outside_temp, :inside_temp, :fan_status, :driver_temp_setting,
             :passenger_temp_setting, :is_climate_on, :is_rear_defroster_on,
-            :is_front_defroster_on
+            :is_front_defroster_on,
+            :tpms_pressure_fl, :tpms_pressure_fr,
+            :tpms_pressure_rl, :tpms_pressure_rr
           ])
         end)
 
@@ -131,7 +133,7 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
         )
       end
 
-      if rem(idx, 100) == 0 do
+      if rem(idx, @progress_interval) == 0 do
         progress_fn.(idx, total)
       end
     end)
@@ -321,6 +323,29 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
       :ok
     else
       {:error, {:data_exists, non_empty}}
+    end
+  end
+
+  @doc """
+  Checks if a TeslaMate car exists for the given VIN and whether it has data.
+  Returns {:ok, nil} if no car found, or {:ok, %{tm_car_id: id, tm_data_counts: counts}}.
+  """
+  def check_tm_data_for_vin(nil), do: {:ok, nil}
+  def check_tm_data_for_vin(""), do: {:ok, nil}
+
+  def check_tm_data_for_vin(vin) do
+    case Repo.one(from(c in Car, where: c.vin == ^vin, select: c.id)) do
+      nil ->
+        {:ok, nil}
+
+      car_id ->
+        case check_car_has_no_data(car_id) do
+          :ok ->
+            {:ok, %{tm_car_id: car_id, tm_data_counts: %{}}}
+
+          {:error, {:data_exists, counts}} ->
+            {:ok, %{tm_car_id: car_id, tm_data_counts: counts}}
+        end
     end
   end
 
