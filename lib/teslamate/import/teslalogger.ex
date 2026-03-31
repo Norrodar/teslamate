@@ -543,11 +543,13 @@ defmodule TeslaMate.Import.TeslaLogger do
       sorted_pos_array =
         Writer.build_sorted_array(state.date_to_pos_id, fn {dt, _} -> dt end, fn {dt, _} -> dt end)
 
+      rows = filter_zero_duration(rows, "drives")
+
       {mapped, _count} =
         Enum.map_reduce(rows, 0, fn row, count ->
           drive_attrs = Mapper.map_drive(row, timezone)
 
-          # Binary search for positions within drive time range
+          # Enrich with position data
           drive_positions =
             find_positions_in_range(
               sorted_pos_array,
@@ -617,6 +619,8 @@ defmodule TeslaMate.Import.TeslaLogger do
           charge = Mapper.map_charge(row, timezone)
           Map.put(charge, :tl_chargingstate_id, row["chargingstate_id"])
         end)
+
+      cp_rows = filter_zero_duration(cp_rows, "charging processes")
 
       # Map and enrich charging_processes
       mapped_cps =
@@ -798,6 +802,22 @@ defmodule TeslaMate.Import.TeslaLogger do
     else
       {valid, state}
     end
+  end
+
+  # Filters out rows where StartDate == EndDate (zero-duration entries from TeslaLogger,
+  # typically brief wake-ups). These would otherwise cause cascading 1-second overlaps
+  # when ensure_end_after_start adds +1s to make end > start.
+  defp filter_zero_duration(rows, label) do
+    {kept, dropped} =
+      Enum.split_with(rows, fn row ->
+        not (row["StartDate"] == row["EndDate"] and row["StartDate"] != nil)
+      end)
+
+    if dropped != [] do
+      Logger.info("Filtered #{length(dropped)} zero-duration #{label} (start == end)")
+    end
+
+    kept
   end
 
   defp finalize(state) do
