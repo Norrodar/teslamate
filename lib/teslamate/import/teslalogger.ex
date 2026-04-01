@@ -834,6 +834,11 @@ defmodule TeslaMate.Import.TeslaLogger do
     state = run_post_import_validation(state)
     state = update_status(state, &Status.complete_step(&1, :validation))
 
+    # Apply geofences to imported drives and charging processes
+    Logger.info("Applying geofences to imported data...")
+    TeslaMate.Locations.apply_all_geofences()
+    Logger.info("Geofence assignment complete.")
+
     # Complete
     state = update_status(state, &Status.set_state(&1, :complete))
     Logger.info("TeslaLogger import complete!")

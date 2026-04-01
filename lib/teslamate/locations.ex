@@ -179,6 +179,14 @@ defmodule TeslaMate.Locations do
     |> Repo.one()
   end
 
+  @doc "Re-applies all existing geofences to drives and charging processes."
+  def apply_all_geofences do
+    list_geofences()
+    |> Enum.each(fn geofence -> apply_geofence(geofence) end)
+
+    :ok
+  end
+
   def create_geofence(attrs) do
     Repo.transaction(fn ->
       with {:ok, geofence} <- %GeoFence{} |> GeoFence.changeset(attrs) |> Repo.insert(),

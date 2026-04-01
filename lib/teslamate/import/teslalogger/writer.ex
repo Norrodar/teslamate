@@ -223,7 +223,7 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
         Enum.map(batch, fn charge ->
           charge
           |> Map.take([
-            :charging_process_id, :date, :battery_level, :usable_battery_level,
+            :charging_process_id, :date, :battery_level,
             :charge_energy_added, :charger_actual_current, :charger_phases,
             :charger_pilot_current, :charger_power, :charger_voltage,
             :conn_charge_cable, :fast_charger_present, :fast_charger_brand,
@@ -600,7 +600,12 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
 
   defp ensure_charge_defaults(charge) do
     charge
-    |> Map.put_new(:charger_phases, 1)
+    # Map.update (not put_new) so explicit nil from DC charges also gets the default
+    |> Map.update(:charger_phases, 1, fn
+      nil -> 1
+      0 -> 1
+      val -> val
+    end)
     |> Map.update(:charge_energy_added, Decimal.new(0), fn
       nil -> Decimal.new(0)
       val -> val

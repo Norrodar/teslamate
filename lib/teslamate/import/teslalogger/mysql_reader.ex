@@ -136,6 +136,10 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
 
   @doc "Reads charge data points for a given car, ordered by timestamp."
   def read_charges(conn, car_id) do
+    # Use a correlated subquery to guarantee at most one chargingstate match per
+    # charging row. Without this, overlapping chargingstate time ranges would cause
+    # the LEFT JOIN to produce duplicate rows. We pick the longest (most specific)
+    # session when there is ambiguity at boundaries.
     query = """
     SELECT c.id, c.Datum, c.battery_level,
            c.charge_energy_added,
@@ -148,8 +152,13 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
            cs.fast_charger_brand, cs.fast_charger_type,
            cs.conn_charge_cable
     FROM charging c
-    LEFT JOIN chargingstate cs ON c.Datum BETWEEN cs.StartDate AND cs.EndDate
-      AND cs.CarID = c.CarID
+    LEFT JOIN chargingstate cs ON cs.id = (
+      SELECT cs2.id FROM chargingstate cs2
+      WHERE cs2.CarID = c.CarID
+        AND c.Datum BETWEEN cs2.StartDate AND cs2.EndDate
+      ORDER BY TIMESTAMPDIFF(SECOND, cs2.StartDate, cs2.EndDate) DESC
+      LIMIT 1
+    )
     WHERE c.CarID = ?
     ORDER BY c.Datum ASC
     """

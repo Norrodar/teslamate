@@ -54,7 +54,12 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
   end
 
   def handle_event("select_mode", %{"value" => mode}, socket) do
-    {:noreply, assign(socket, import_mode: mode)}
+    # Guard: clean only when no TM data, merge only when TM has data
+    cond do
+      mode == "clean" and socket.assigns.status.tm_has_data -> {:noreply, socket}
+      mode in ["merge_tm", "merge_tl"] and not socket.assigns.status.tm_has_data -> {:noreply, socket}
+      true -> {:noreply, assign(socket, import_mode: mode)}
+    end
   end
 
   def handle_event("update_car_vin", %{"value" => vin}, socket) do
@@ -85,7 +90,15 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
   @impl true
   def handle_info({:teslalogger_import, %Status{} = status}, socket) do
-    {:noreply, assign(socket, status: status)}
+    # Auto-switch away from "clean" mode when TM has data (clean would be disabled)
+    import_mode =
+      if status.tm_has_data and socket.assigns.import_mode == "clean" do
+        "merge_tm"
+      else
+        socket.assigns.import_mode
+      end
+
+    {:noreply, assign(socket, status: status, import_mode: import_mode)}
   end
 
   defp do_start_import(socket) do
@@ -271,15 +284,22 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         <h3 class="title is-5"><%= gettext("Import Mode") %></h3>
 
         <div class="field">
-          <label class="radio mb-3" style="display: block;">
+          <label class={"radio mb-3 #{if @status.tm_has_data, do: "has-text-grey-light"}"} style="display: block;">
             <input type="radio" name="import_mode" value="clean"
                    checked={@import_mode == "clean"}
+                   disabled={@status.tm_has_data}
                    phx-click="select_mode" phx-value-value="clean" />
             <strong>Clean database</strong>
-            <p class="has-text-grey ml-5">
+            <p class={"ml-5 #{if @status.tm_has_data, do: "has-text-grey-light", else: "has-text-grey"}"}>
               Expects an empty TeslaMate database for this vehicle.
               Aborts if data already exists.
             </p>
+            <%= if @status.tm_has_data do %>
+              <p class="ml-5 is-size-7 has-text-warning-dark">
+                <span class="icon is-small"><span class="mdi mdi-information-outline"></span></span>
+                TeslaMate already has data for this vehicle. Delete it manually if you want a clean import.
+              </p>
+            <% end %>
           </label>
 
           <label class={"radio mb-3 #{unless @status.tm_has_data, do: "has-text-grey-light"}"} style="display: block;">
@@ -457,14 +477,29 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
       <div class="box mt-4">
         <h3 class="title is-5"><%= gettext("Validation Warnings") %></h3>
         <div class="content" style="max-height: 400px; overflow-y: auto;">
-          <ul>
-            <%= for warning <- Enum.take(@status.warnings, 50) do %>
-              <li class="has-text-warning"><%= warning %></li>
-            <% end %>
-            <%= if length(@status.warnings) > 50 do %>
-              <li>... and <%= length(@status.warnings) - 50 %> more</li>
-            <% end %>
-          </ul>
+          <%= for {category, warnings} <- group_warnings(@status.warnings) do %>
+            <div class="mb-4">
+              <p class="mb-1">
+                <span><%= warning_icon(category) %></span>
+                <strong><%= warning_title(category) %></strong>
+                <span class="tag is-light is-rounded ml-1"><%= length(warnings) %></span>
+              </p>
+              <p class="is-size-7 has-text-grey mb-2 ml-5"><%= warning_explanation(category) %></p>
+              <details class="ml-5">
+                <summary class="is-size-7 has-text-grey-light" style="cursor: pointer;">
+                  Show details (<%= length(warnings) %> entries)
+                </summary>
+                <ul class="is-size-7 mt-1">
+                  <%= for warning <- Enum.take(warnings, 20) do %>
+                    <li class="has-text-grey"><%= warning %></li>
+                  <% end %>
+                  <%= if length(warnings) > 20 do %>
+                    <li class="has-text-grey-light">... and <%= length(warnings) - 20 %> more</li>
+                  <% end %>
+                </ul>
+              </details>
+            </div>
+          <% end %>
         </div>
       </div>
     <% end %>
@@ -565,4 +600,53 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
   end
 
   defp format_number(n), do: to_string(n)
+
+  # Warning grouping and display helpers
+
+  defp group_warnings(warnings) do
+    warnings
+    |> Enum.group_by(&warning_category/1)
+    |> Enum.sort_by(fn {cat, _} -> warning_sort_order(cat) end)
+  end
+
+  defp warning_category(warning) do
+    cond do
+      String.contains?(warning, "positions without drive") -> :orphan_positions
+      String.contains?(warning, "[drives#overlap]") -> :drive_overlaps
+      String.contains?(warning, "[charging_processes#overlap]") -> :charge_overlaps
+      true -> :other
+    end
+  end
+
+  defp warning_sort_order(:orphan_positions), do: 1
+  defp warning_sort_order(:drive_overlaps), do: 2
+  defp warning_sort_order(:charge_overlaps), do: 3
+  defp warning_sort_order(:other), do: 4
+
+  defp warning_icon(:orphan_positions), do: "ℹ️"
+  defp warning_icon(:drive_overlaps), do: "⚠️"
+  defp warning_icon(:charge_overlaps), do: "⚠️"
+  defp warning_icon(:other), do: "❓"
+
+  defp warning_title(:orphan_positions), do: "Positions without drive assignment"
+  defp warning_title(:drive_overlaps), do: "Drive time overlaps"
+  defp warning_title(:charge_overlaps), do: "Charging session overlaps"
+  defp warning_title(:other), do: "Other warnings"
+
+  defp warning_explanation(:orphan_positions) do
+    "Harmless. TeslaLogger records positions outside of drives (e.g. while parked). " <>
+      "These are imported but not assigned to any drive. Grafana dashboards are not affected."
+  end
+
+  defp warning_explanation(:drive_overlaps) do
+    "Cosmetic. Usually caused by very short drives (car briefly woke up) that create " <>
+      "1-second time overlaps. No data loss, dashboards work normally."
+  end
+
+  defp warning_explanation(:charge_overlaps) do
+    "Cosmetic. Usually caused by brief charging sessions at time boundaries. " <>
+      "No data loss, dashboards work normally."
+  end
+
+  defp warning_explanation(:other), do: "Review these entries manually if unexpected."
 end

@@ -144,7 +144,7 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       ideal_battery_range_km: to_decimal(row["ideal_battery_range_km"]),
       rated_battery_range_km: to_decimal(row["battery_range_km"]),
       charger_voltage: to_integer(row["charger_voltage"]),
-      charger_phases: to_integer(row["charger_phases"]),
+      charger_phases: clamp_phases(to_integer(row["charger_phases"])),
       charger_actual_current: to_integer(row["charger_actual_current"]),
       outside_temp: to_decimal(row["outside_temp"]),
       charger_pilot_current: to_integer(row["charger_pilot_current"]),
@@ -418,15 +418,35 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
   @dc_charger_types ~w(Combo CCS CHAdeMO Tesla SuperCharger)
 
   defp is_dc_charger?(row) do
-    type = row["fast_charger_type"]
-    brand = row["fast_charger_brand"]
+    phases = to_integer(row["charger_phases"])
 
-    cond do
-      type != nil and type != "" and type in @dc_charger_types -> true
-      brand != nil and String.contains?(brand, "Tesla") -> true
-      true -> false
+    # AC charging always reports phases (1-3, TeslaLogger sometimes stores 4).
+    # DC charging has 0 or nil phases.
+    # We check phases first because TeslaLogger may store fast_charger_brand = "Tesla"
+    # for ALL sessions (including AC home charging), making brand unreliable alone.
+    if phases != nil and phases > 0 do
+      false
+    else
+      type = row["fast_charger_type"]
+      brand = row["fast_charger_brand"]
+
+      cond do
+        type != nil and type != "" and type in @dc_charger_types -> true
+        brand != nil and brand != "" and String.contains?(brand, "Tesla") -> true
+        # No phases, no brand/type — high power suggests DC
+        true ->
+          power = to_integer(row["charger_power"])
+          power != nil and power > 25
+      end
     end
   end
+
+  # TeslaLogger sometimes stores 4 phases (3-phase + neutral), but TeslaMate
+  # only accepts 1-3. Clamp to valid range.
+  defp clamp_phases(nil), do: nil
+  defp clamp_phases(p) when p > 3, do: 3
+  defp clamp_phases(p) when p < 1, do: nil
+  defp clamp_phases(p), do: p
 
   defp non_empty_string(nil), do: nil
   defp non_empty_string(""), do: nil
