@@ -198,6 +198,37 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
     end
   end
 
+  @doc """
+  Corrects the DC/AC classification for a list of charges belonging to one session.
+  Uses the average charger_power across the session as the most reliable indicator:
+  - avg power > 25 kW → DC (set charger_phases to nil, fast_charger_present to true)
+  - avg power ≤ 25 kW → AC (preserve/restore charger_phases, fast_charger_present to false)
+  """
+  def correct_dc_classification(charges) when is_list(charges) do
+    powers =
+      charges
+      |> Enum.map(& &1.charger_power)
+      |> Enum.filter(&(is_number(&1) and &1 > 0))
+
+    case powers do
+      [] ->
+        charges
+
+      powers ->
+        avg_power = Enum.sum(powers) / length(powers)
+        dc? = avg_power > 25
+
+        Enum.map(charges, fn charge ->
+          %{charge |
+            fast_charger_present: dc?,
+            charger_phases: if(dc?, do: nil, else: charge.charger_phases || 1),
+            fast_charger_brand: if(dc?, do: charge.fast_charger_brand),
+            fast_charger_type: if(dc?, do: charge.fast_charger_type)
+          }
+        end)
+    end
+  end
+
   # Calculates energy used (kWh) from charge rows, same logic as TeslaMate's
   # Log.calculate_energy_used: power * time_delta for each consecutive pair.
   defp calculate_energy_used(charges) when length(charges) < 2, do: nil

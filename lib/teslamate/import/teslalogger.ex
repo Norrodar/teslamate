@@ -622,6 +622,13 @@ defmodule TeslaMate.Import.TeslaLogger do
           Map.put(charge, :tl_chargingstate_id, row["chargingstate_id"])
         end)
 
+      # Correct DC/AC classification per session using average power.
+      # TeslaLogger row-level DC detection is unreliable — session avg is definitive.
+      mapped_charges =
+        mapped_charges
+        |> Enum.group_by(& &1.tl_chargingstate_id)
+        |> Enum.flat_map(fn {_id, charges} -> Mapper.correct_dc_classification(charges) end)
+
       cp_rows = filter_zero_duration(cp_rows, "charging processes")
       cp_rows = filter_phantom_sessions(cp_rows)
 
@@ -631,7 +638,6 @@ defmodule TeslaMate.Import.TeslaLogger do
           cp_attrs = Mapper.map_charging_process(row, timezone)
           tl_cs_id = row["id"]
 
-          # Find charges belonging to this charging session
           session_charges =
             Enum.filter(mapped_charges, &(&1.tl_chargingstate_id == tl_cs_id))
 
