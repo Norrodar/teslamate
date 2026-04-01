@@ -20,7 +20,9 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       outside_temp: to_decimal(row["outside_temp"]),
       battery_heater: to_boolean(row["battery_heater"]),
       ideal_battery_range_km: to_decimal(row["ideal_battery_range_km"] || row["battery_range_km"]),
-      rated_battery_range_km: to_decimal(row["battery_range_km"])
+      # TeslaLogger's battery_range_km is a static max-range value, not a dynamic rated range.
+      # Use ideal_battery_range_km for both to avoid broken efficiency calculations.
+      rated_battery_range_km: to_decimal(row["ideal_battery_range_km"] || row["battery_range_km"])
     }
   end
 
@@ -142,7 +144,8 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       charge_energy_added: to_decimal(row["charge_energy_added"]),
       charger_power: to_integer(row["charger_power"]),
       ideal_battery_range_km: to_decimal(row["ideal_battery_range_km"]),
-      rated_battery_range_km: to_decimal(row["battery_range_km"]),
+      # TeslaLogger's battery_range_km is static, not dynamic rated range
+      rated_battery_range_km: to_decimal(row["ideal_battery_range_km"]),
       charger_voltage: to_integer(row["charger_voltage"]),
       charger_phases: if(dc?, do: nil, else: clamp_phases(to_integer(row["charger_phases"]))),
       charger_actual_current: to_integer(row["charger_actual_current"]),
@@ -167,7 +170,9 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       end_date: end_date,
       charge_energy_added: to_decimal(row["charge_energy_added"]),
       cost: to_decimal(row["cost_total"]),
-      duration_min: duration_minutes(start_date, end_date)
+      duration_min: duration_minutes(start_date, end_date),
+      # Actual energy drawn from grid (meter/invoice value from TeslaLogger)
+      meter_energy_used: to_decimal(row["cost_kwh_meter_invoice"])
     }
   end
 
@@ -183,9 +188,21 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
         last = List.last(all)
 
         outside_temp_avg = decimal_avg(all, & &1.outside_temp)
-        energy_used = calculate_energy_used(all)
 
-        Map.merge(cp_attrs, %{
+        # Prefer meter/invoice value from TeslaLogger (actual grid energy),
+        # fall back to calculated energy from charge rows
+        energy_used =
+          case cp_attrs[:meter_energy_used] do
+            %Decimal{} = d ->
+              if Decimal.compare(d, 0) == :gt, do: d, else: calculate_energy_used(all)
+
+            _ ->
+              calculate_energy_used(all)
+          end
+
+        cp_attrs
+        |> Map.delete(:meter_energy_used)
+        |> Map.merge(%{
           start_battery_level: first.battery_level,
           end_battery_level: last.battery_level,
           start_ideal_range_km: first.ideal_battery_range_km,
@@ -234,6 +251,11 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
   defp calculate_energy_used(charges) when length(charges) < 2, do: nil
 
   defp calculate_energy_used(charges) do
+    # Max gap between two consecutive charge rows to count as continuous charging.
+    # TeslaLogger logs rows every ~60s during active charging; gaps larger than
+    # 5 minutes indicate the car was idle/sleeping while plugged in.
+    max_gap_seconds = 300
+
     charges
     |> Enum.reject(fn c -> is_nil(c.date) end)
     |> Enum.chunk_every(2, 1, :discard)
@@ -241,7 +263,7 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       power_kw = effective_power(b)
       seconds = DateTime.diff(b.date, a.date, :second)
 
-      if power_kw != nil and seconds > 0 do
+      if power_kw != nil and seconds > 0 and seconds <= max_gap_seconds do
         # energy = power (kW) * time (hours)
         energy = Decimal.mult(power_kw, Decimal.div(Decimal.new(seconds), Decimal.new(3600)))
 
