@@ -37,7 +37,8 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
           car_count: non_neg_integer(),
           import_mode: import_mode(),
           mysql_car_info: [map()],
-          tm_has_data: boolean()
+          tm_has_data: boolean(),
+          geocoding_lookups: non_neg_integer()
         }
 
   defstruct state: :idle,
@@ -48,7 +49,8 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
             car_count: 0,
             import_mode: :clean,
             mysql_car_info: [],
-            tm_has_data: false
+            tm_has_data: false,
+            geocoding_lookups: 0
 
   @step_names [
     :cars,
@@ -144,6 +146,10 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
       end)
 
     %{status | steps: steps, state: {:error, reason}}
+  end
+
+  def set_geocoding_lookups(%__MODULE__{} = status, count) do
+    %{status | geocoding_lookups: count}
   end
 
   def add_warning(%__MODULE__{} = status, warning) do

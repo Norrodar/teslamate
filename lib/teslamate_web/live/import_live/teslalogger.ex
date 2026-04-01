@@ -461,8 +461,23 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
     <%= if @status.state == :complete do %>
       <div class="notification is-success">
-        <strong>Import complete!</strong>
-        Geocoding will continue in the background. Check the Grafana dashboards to verify the imported data.
+        <p class="mb-2"><strong>Import complete!</strong></p>
+        <%= if @status.geocoding_lookups > 0 do %>
+          <p class="mb-2">
+            <span class="icon"><span class="mdi mdi-map-marker-multiple"></span></span>
+            <strong><%= format_number(@status.geocoding_lookups) %></strong> addresses need reverse geocoding via Nominatim
+            (rate limit: 1 request per ~2 seconds).
+            <br/>
+            Estimated time: <strong><%= format_geocoding_duration(@status.geocoding_lookups) %></strong>.
+            This runs automatically in the background.
+          </p>
+          <p class="is-size-7 has-text-success-dark">
+            Until geocoding is complete, some Grafana dashboards may show coordinates instead of
+            addresses, and geofence filters may not match all entries.
+          </p>
+        <% else %>
+          <p>All addresses already resolved. Check the Grafana dashboards to verify the imported data.</p>
+        <% end %>
       </div>
     <% end %>
 
@@ -600,6 +615,35 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
   end
 
   defp format_number(n), do: to_string(n)
+
+  # Estimate: ~2 seconds per lookup (1.5s sleep + network)
+  defp format_geocoding_duration(lookups) when lookups <= 0, do: "—"
+
+  defp format_geocoding_duration(lookups) do
+    total_seconds = lookups * 2
+    total_minutes = ceil(total_seconds / 60)
+
+    cond do
+      total_minutes < 60 ->
+        if total_minutes == 1, do: "~1 minute", else: "~#{total_minutes} minutes"
+
+      true ->
+        hours = total_seconds / 3600
+        # Round up to nearest 0.5 hours
+        rounded_hours = Float.ceil(hours * 2) / 2
+
+        cond do
+          rounded_hours == 1.0 ->
+            "~1 hour"
+
+          rounded_hours == Float.floor(rounded_hours) ->
+            "~#{round(rounded_hours)} hours"
+
+          true ->
+            "~#{:erlang.float_to_binary(rounded_hours, decimals: 1)} hours"
+        end
+    end
+  end
 
   # Warning grouping and display helpers
 

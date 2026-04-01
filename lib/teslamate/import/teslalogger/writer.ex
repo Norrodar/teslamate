@@ -600,10 +600,12 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
 
   defp ensure_charge_defaults(charge) do
     charge
-    # Map.update (not put_new) so explicit nil from DC charges also gets the default
-    |> Map.update(:charger_phases, 1, fn
-      nil -> 1
-      0 -> 1
+    # For DC charges (charger_phases = nil), keep nil so Grafana detects DC correctly.
+    # For AC charges, default nil/0 to 1.
+    # Grafana logic: NULLIF(mode(charger_phases), 0) IS NULL → DC, else AC
+    |> Map.update(:charger_phases, nil, fn
+      nil -> nil
+      0 -> nil
       val -> val
     end)
     |> Map.update(:charge_energy_added, Decimal.new(0), fn

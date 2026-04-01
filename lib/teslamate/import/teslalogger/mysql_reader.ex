@@ -150,7 +150,7 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
            c.charger_pilot_current, c.battery_heater,
            cs.id AS chargingstate_id,
            cs.fast_charger_brand, cs.fast_charger_type,
-           cs.conn_charge_cable
+           cs.conn_charge_cable, cs.max_charger_power
     FROM charging c
     LEFT JOIN chargingstate cs ON cs.id = (
       SELECT cs2.id FROM chargingstate cs2

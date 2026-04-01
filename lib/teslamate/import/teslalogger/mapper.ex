@@ -144,7 +144,7 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       ideal_battery_range_km: to_decimal(row["ideal_battery_range_km"]),
       rated_battery_range_km: to_decimal(row["battery_range_km"]),
       charger_voltage: to_integer(row["charger_voltage"]),
-      charger_phases: clamp_phases(to_integer(row["charger_phases"])),
+      charger_phases: if(dc?, do: nil, else: clamp_phases(to_integer(row["charger_phases"]))),
       charger_actual_current: to_integer(row["charger_actual_current"]),
       outside_temp: to_decimal(row["outside_temp"]),
       charger_pilot_current: to_integer(row["charger_pilot_current"]),
@@ -183,16 +183,65 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
         last = List.last(all)
 
         outside_temp_avg = decimal_avg(all, & &1.outside_temp)
+        energy_used = calculate_energy_used(all)
 
         Map.merge(cp_attrs, %{
           start_battery_level: first.battery_level,
           end_battery_level: last.battery_level,
           start_ideal_range_km: first.ideal_battery_range_km,
           end_ideal_range_km: last.ideal_battery_range_km,
-          outside_temp_avg: outside_temp_avg
+          start_rated_range_km: first.rated_battery_range_km,
+          end_rated_range_km: last.rated_battery_range_km,
+          outside_temp_avg: outside_temp_avg,
+          charge_energy_used: energy_used
         })
     end
   end
+
+  # Calculates energy used (kWh) from charge rows, same logic as TeslaMate's
+  # Log.calculate_energy_used: power * time_delta for each consecutive pair.
+  defp calculate_energy_used(charges) when length(charges) < 2, do: nil
+
+  defp calculate_energy_used(charges) do
+    charges
+    |> Enum.reject(fn c -> is_nil(c.date) end)
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.reduce(Decimal.new(0), fn [a, b], acc ->
+      power_kw = effective_power(b)
+      seconds = DateTime.diff(b.date, a.date, :second)
+
+      if power_kw != nil and seconds > 0 do
+        # energy = power (kW) * time (hours)
+        energy = Decimal.mult(power_kw, Decimal.div(Decimal.new(seconds), Decimal.new(3600)))
+
+        if Decimal.compare(energy, 0) != :lt do
+          Decimal.add(acc, energy)
+        else
+          acc
+        end
+      else
+        acc
+      end
+    end)
+    |> Decimal.round(2)
+    |> case do
+      %Decimal{} = d -> if Decimal.compare(d, 0) == :gt, do: d, else: nil
+    end
+  end
+
+  # Effective charging power in kW for a charge row.
+  # Prefers current * voltage * phases (more accurate), falls back to charger_power.
+  defp effective_power(%{charger_actual_current: amps, charger_voltage: volts, charger_phases: phases})
+       when is_integer(amps) and is_integer(volts) and amps > 0 and volts > 0 do
+    p = (phases || 1) |> max(1)
+    Decimal.div(Decimal.new(amps * volts * p), Decimal.new(1000))
+  end
+
+  defp effective_power(%{charger_power: power}) when is_integer(power) and power > 0 do
+    Decimal.new(power)
+  end
+
+  defp effective_power(_), do: nil
 
   @doc "Maps a TeslaLogger car_version row to TeslaMate update attrs."
   def map_update(row, timezone) do
@@ -419,25 +468,32 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
 
   defp is_dc_charger?(row) do
     phases = to_integer(row["charger_phases"])
+    max_power = to_float(row["max_charger_power"])
+    type = non_empty_string(row["fast_charger_type"])
 
-    # AC charging always reports phases (1-3, TeslaLogger sometimes stores 4).
-    # DC charging has 0 or nil phases.
-    # We check phases first because TeslaLogger may store fast_charger_brand = "Tesla"
-    # for ALL sessions (including AC home charging), making brand unreliable alone.
-    if phases != nil and phases > 0 do
-      false
-    else
-      type = row["fast_charger_type"]
-      brand = row["fast_charger_brand"]
+    cond do
+      # 1. Session-level max power — most reliable indicator.
+      #    AC tops out at ~22 kW (3-phase 32A), DC starts at ~25 kW minimum.
+      max_power != nil and max_power > 25 ->
+        true
 
-      cond do
-        type != nil and type != "" and type in @dc_charger_types -> true
-        brand != nil and brand != "" and String.contains?(brand, "Tesla") -> true
-        # No phases, no brand/type — high power suggests DC
-        true ->
-          power = to_integer(row["charger_power"])
-          power != nil and power > 25
-      end
+      # 2. Known DC charger type from Tesla API (e.g. "Tesla", "CCS", "CHAdeMO")
+      type != nil and type in @dc_charger_types ->
+        true
+
+      # 3. AC charging always reports phases (1-3, TL sometimes stores 4).
+      #    Checked AFTER power/type so a 150 kW Supercharger with phases=1 isn't misclassified.
+      phases != nil and phases > 0 ->
+        false
+
+      # 4. Low max_power with no phases → AC
+      max_power != nil and max_power <= 25 ->
+        false
+
+      # 5. Last resort: per-row charger_power
+      true ->
+        power = to_integer(row["charger_power"])
+        power != nil and power > 25
     end
   end
 

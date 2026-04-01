@@ -569,6 +569,8 @@ defmodule TeslaMate.Import.TeslaLogger do
           {enriched, new_count}
         end)
 
+      mapped = filter_phantom_drives(mapped)
+
       state = update_status(state, &Status.set_phase(&1, :drives, :validating))
 
       {valid, errors} = Validator.validate_drives(mapped)
@@ -621,6 +623,7 @@ defmodule TeslaMate.Import.TeslaLogger do
         end)
 
       cp_rows = filter_zero_duration(cp_rows, "charging processes")
+      cp_rows = filter_phantom_sessions(cp_rows)
 
       # Map and enrich charging_processes
       mapped_cps =
@@ -820,7 +823,143 @@ defmodule TeslaMate.Import.TeslaLogger do
     kept
   end
 
+  # Filter phantom charging sessions where TeslaLogger's own charge_energy_added
+  # (set at session end) is nil or near-zero. These are brief wake-ups where the
+  # charging rows still carry stale cumulative values from the previous real session,
+  # producing phantom entries with impossibly high energy/power readings.
+  defp filter_phantom_sessions(cp_rows) do
+    {kept, dropped} =
+      Enum.split_with(cp_rows, fn row ->
+        energy = row["charge_energy_added"]
+
+        energy_val =
+          cond do
+            is_number(energy) -> energy + 0.0
+            is_struct(energy, Decimal) -> Decimal.to_float(energy)
+            true -> nil
+          end
+
+        # Keep session if TL recorded meaningful energy, or if energy is unknown (nil).
+        # Only drop when TL explicitly says ~0 kWh — that's a phantom wake-up.
+        energy_val == nil or energy_val > 0.1
+      end)
+
+    if dropped != [] do
+      Logger.info("Filtered #{length(dropped)} phantom charging sessions (TL charge_energy_added nil or ~0)")
+    end
+
+    kept
+  end
+
+  # TeslaLogger frequently creates phantom drives from brief wake-ups or GPS noise.
+  # These show up as entries with zero/tiny distance or nil positions. We drop a drive
+  # when ANY of these conditions is true:
+  #   1. distance is nil (no position data at all)
+  #   2. distance <= 0 (car didn't actually move)
+  #   3. distance < 0.5 km AND duration < 2 minutes (micro-movement, GPS jitter)
+  defp filter_phantom_drives(drives) do
+    {kept, dropped} =
+      Enum.split_with(drives, fn drive ->
+        distance = drive[:distance]
+        duration = drive[:duration_min]
+
+        cond do
+          # No position data → phantom
+          is_nil(distance) -> false
+          # Didn't move or moved backwards → phantom
+          distance <= 0 -> false
+          # Micro-movement: less than 500m in under 2 minutes → phantom
+          distance < 0.5 and is_number(duration) and duration < 2 -> false
+          # Real drive
+          true -> true
+        end
+      end)
+
+    if dropped != [] do
+      Logger.info("Filtered #{length(dropped)} phantom drives (no movement or micro-movement)")
+    end
+
+    kept
+  end
+
+  # Recalculate efficiency factor for each imported car from charging data.
+  # Same logic as TeslaMate's Log.recalculate_efficiency:
+  # efficiency = charge_energy_added / (end_rated_range_km - start_rated_range_km)
+  defp recalculate_car_efficiencies(state) do
+    Enum.each(state.car_mapping, fn {_tl_id, car} ->
+      query =
+        from cp in TeslaMate.Log.ChargingProcess,
+          select: {
+            round(
+              cp.charge_energy_added /
+                nullif(cp.end_ideal_range_km - cp.start_ideal_range_km, 0),
+              4
+            ),
+            count()
+          },
+          where:
+            cp.car_id == ^car.id and cp.duration_min > 10 and cp.end_battery_level <= 95 and
+              not is_nil(cp.end_ideal_range_km) and not is_nil(cp.start_ideal_range_km) and
+              cp.charge_energy_added > 0.0,
+          group_by: 1,
+          order_by: [desc: 2],
+          limit: 1
+
+      case Repo.one(query) do
+        {factor, n} when not is_nil(factor) and n >= 2 ->
+          factor_float = Decimal.to_float(factor)
+
+          if factor_float > 0 do
+            Logger.info("Car #{car.id}: derived efficiency #{Float.round(factor_float * 1000, 1)} Wh/km (#{n}x confirmed)")
+
+            TeslaMate.Log.Car
+            |> Repo.get!(car.id)
+            |> TeslaMate.Log.Car.changeset(%{efficiency: factor_float})
+            |> Repo.update!()
+          end
+
+        _ ->
+          Logger.warning("Car #{car.id}: could not derive efficiency — not enough charging data")
+      end
+    end)
+  end
+
+  defp count_geocoding_lookups do
+    # Each drive without start/end address needs 1 Nominatim lookup per missing address.
+    # Each charging process without address needs 1 lookup.
+    # Nominatim is always called (even for DB-cached addresses), so every lookup = 1 API call.
+    drive_lookups =
+      Repo.one(
+        from(d in TeslaMate.Log.Drive,
+          where:
+            (is_nil(d.start_address_id) or is_nil(d.end_address_id)) and
+              not is_nil(d.start_position_id) and not is_nil(d.end_position_id),
+          select:
+            fragment(
+              "COALESCE(SUM(CASE WHEN ? IS NULL THEN 1 ELSE 0 END), 0) + COALESCE(SUM(CASE WHEN ? IS NULL THEN 1 ELSE 0 END), 0)",
+              d.start_address_id,
+              d.end_address_id
+            )
+        )
+      ) || 0
+
+    charge_lookups =
+      Repo.aggregate(
+        from(c in TeslaMate.Log.ChargingProcess,
+          where: is_nil(c.address_id) and not is_nil(c.position_id)
+        ),
+        :count
+      ) || 0
+
+    drive_lookups + charge_lookups
+  end
+
   defp finalize(state) do
+    # Count geocoding lookups needed before triggering repair
+    geocoding_lookups = count_geocoding_lookups()
+    Logger.info("Geocoding: #{geocoding_lookups} reverse lookups needed")
+    state = update_status(state, &Status.set_geocoding_lookups(&1, geocoding_lookups))
+
     # Trigger geocoding
     state = update_status(state, &Status.start_step(&1, :geocoding))
     case Repair.trigger_run() do
@@ -838,6 +977,9 @@ defmodule TeslaMate.Import.TeslaLogger do
     Logger.info("Applying geofences to imported data...")
     TeslaMate.Locations.apply_all_geofences()
     Logger.info("Geofence assignment complete.")
+
+    # Recalculate car efficiency from imported charging data
+    recalculate_car_efficiencies(state)
 
     # Complete
     state = update_status(state, &Status.set_state(&1, :complete))
