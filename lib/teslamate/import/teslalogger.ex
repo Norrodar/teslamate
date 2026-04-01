@@ -890,10 +890,11 @@ defmodule TeslaMate.Import.TeslaLogger do
       query =
         from cp in TeslaMate.Log.ChargingProcess,
           select: {
-            round(
-              cp.charge_energy_added /
-                nullif(cp.end_ideal_range_km - cp.start_ideal_range_km, 0),
-              4
+            fragment(
+              "round(? / nullif(? - ?, 0), 4)",
+              cp.charge_energy_added,
+              cp.end_ideal_range_km,
+              cp.start_ideal_range_km
             ),
             count()
           },
