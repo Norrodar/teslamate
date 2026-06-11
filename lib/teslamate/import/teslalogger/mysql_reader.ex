@@ -177,7 +177,8 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     SELECT id, StartDate, EndDate, charge_energy_added, cost_total,
            cost_per_kwh, cost_per_session, cost_per_minute,
            fast_charger_brand, fast_charger_type,
-           conn_charge_cable, max_charger_power
+           conn_charge_cable, max_charger_power,
+           cost_kwh_meter_invoice
     FROM chargingstate
     WHERE CarID = ?
     ORDER BY StartDate ASC

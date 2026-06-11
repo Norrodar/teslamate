@@ -486,6 +486,12 @@ defmodule TeslaMate.Import.TeslaLogger do
             mapped
         end
 
+      # Filter positions to only keep those within drive or charging session time ranges.
+      # TeslaLogger logs positions continuously (parking, sleeping, etc.) which pollutes
+      # Grafana dashboards like the Speed Histogram. TeslaMate only needs positions that
+      # belong to drives or charging sessions.
+      mapped = filter_positions_to_active_ranges(mapped, conn, tl_car_id, timezone)
+
       state = update_status(state, &Status.set_phase(&1, :positions, :validating))
 
       {valid, errors} = Validator.validate_positions(mapped)
@@ -855,6 +861,123 @@ defmodule TeslaMate.Import.TeslaLogger do
     end
 
     kept
+  end
+
+  # Filters positions to only keep those within drive or charging session time ranges.
+  # TeslaLogger logs positions continuously (every few seconds/minutes), even while
+  # parked or sleeping. These idle positions pollute dashboards (e.g. Speed Histogram
+  # shows 96% at 0-10 km/h from GPS jitter). We read drive and charging session time
+  # ranges from TL MySQL and only keep positions that fall within those ranges.
+  # A small buffer (60s) is added around each range to ensure boundary positions
+  # (needed for start/end_position_id on drives and position_id on charging_processes)
+  # are not lost.
+  defp filter_positions_to_active_ranges(positions, conn, tl_car_id, timezone) do
+    buffer_seconds = 60
+
+    # Read drive time ranges
+    drive_ranges =
+      case MysqlReader.read_drives(conn, tl_car_id) do
+        {:ok, rows} ->
+          rows
+          |> Enum.map(fn r ->
+            m = Mapper.map_drive(r, timezone)
+            {m.start_date, m.end_date}
+          end)
+          |> Enum.reject(fn {s, _} -> is_nil(s) end)
+
+        _ ->
+          []
+      end
+
+    # Read charging session time ranges
+    charge_ranges =
+      case MysqlReader.read_charging_sessions(conn, tl_car_id) do
+        {:ok, rows} ->
+          rows
+          |> Enum.map(fn r ->
+            m = Mapper.map_charging_process(r, timezone)
+            {m.start_date, m.end_date}
+          end)
+          |> Enum.reject(fn {s, _} -> is_nil(s) end)
+
+        _ ->
+          []
+      end
+
+    all_ranges = drive_ranges ++ charge_ranges
+
+    if all_ranges == [] do
+      Logger.warning("No drives or charging sessions found — keeping all positions")
+      positions
+    else
+      # Convert ranges to unix seconds with buffer, then consolidate overlapping ranges
+      unix_ranges =
+        all_ranges
+        |> Enum.map(fn {start_date, end_date} ->
+          s = DateTime.to_unix(start_date, :second) - buffer_seconds
+          e = if end_date, do: DateTime.to_unix(end_date, :second) + buffer_seconds, else: s + 86_400
+          {s, e}
+        end)
+        |> Enum.sort()
+        |> consolidate_unix_ranges()
+        |> List.to_tuple()
+
+      before = length(positions)
+
+      filtered =
+        Enum.filter(positions, fn pos ->
+          case pos.date do
+            nil -> false
+            date -> unix_in_ranges?(DateTime.to_unix(date, :second), unix_ranges)
+          end
+        end)
+
+      dropped = before - length(filtered)
+
+      if dropped > 0 do
+        Logger.info(
+          "Filtered #{dropped} idle positions (kept #{length(filtered)} of #{before} " <>
+            "within #{length(drive_ranges)} drives + #{length(charge_ranges)} charging sessions)"
+        )
+      end
+
+      filtered
+    end
+  end
+
+  # Consolidates sorted {start, end} unix ranges by merging overlapping/adjacent ranges.
+  defp consolidate_unix_ranges([]), do: []
+
+  defp consolidate_unix_ranges([first | rest]) do
+    Enum.reduce(rest, [first], fn {s, e}, [{cs, ce} | acc] ->
+      if s <= ce do
+        # Overlapping or adjacent — extend current range
+        [{cs, max(ce, e)} | acc]
+      else
+        # Gap — start new range
+        [{s, e}, {cs, ce} | acc]
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  # Binary search to check if a unix timestamp falls within any consolidated range.
+  # `ranges` is a tuple of {start, end} pairs for O(1) random access.
+  defp unix_in_ranges?(unix, ranges_tuple) do
+    unix_in_ranges_bs?(unix, ranges_tuple, 0, tuple_size(ranges_tuple) - 1)
+  end
+
+  defp unix_in_ranges_bs?(_unix, _ranges, lo, hi) when lo > hi, do: false
+
+  defp unix_in_ranges_bs?(unix, ranges, lo, hi) do
+    mid = div(lo + hi, 2)
+    {s, e} = elem(ranges, mid)
+
+    cond do
+      unix < s -> unix_in_ranges_bs?(unix, ranges, lo, mid - 1)
+      unix > e -> unix_in_ranges_bs?(unix, ranges, mid + 1, hi)
+      true -> true
+    end
   end
 
   # TeslaLogger frequently creates phantom drives from brief wake-ups or GPS noise.
