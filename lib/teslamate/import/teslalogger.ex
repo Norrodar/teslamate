@@ -31,13 +31,25 @@ defmodule TeslaMate.Import.TeslaLogger do
   def get_status, do: GenServer.call(@name, :get_status)
   def run(car_mapping \\ %{}, opts \\ []), do: GenServer.call(@name, {:run, car_mapping, opts}, :infinity)
   def preflight, do: GenServer.call(@name, :preflight, :infinity)
+  def configure(params), do: GenServer.call(@name, {:configure, params})
+  def reset, do: GenServer.call(@name, :reset)
   def enabled?, do: is_pid(Process.whereis(@name))
   def subscribe, do: Phoenix.PubSub.subscribe(TeslaMate.PubSub, @topic)
 
   @impl true
   def init(opts) do
-    config = Keyword.fetch!(opts, :config)
-    {:ok, %__MODULE__{config: config}}
+    config = Keyword.get(opts, :config)
+    # If all config values are nil (no env vars set), start unconfigured.
+    # Otherwise pre-fill config so env-var defaults are used.
+    effective_config =
+      if config && Enum.any?(config, fn {_, v} -> v != nil end), do: config, else: nil
+
+    status =
+      if effective_config,
+        do: Status.initial(),
+        else: %{Status.initial() | state: :unconfigured}
+
+    {:ok, %__MODULE__{config: effective_config, status: status}}
   end
 
   @impl true
@@ -52,6 +64,30 @@ defmodule TeslaMate.Import.TeslaLogger do
       send(self(), :run_preflight)
       {:reply, :ok, state}
     end
+  end
+
+  def handle_call({:configure, params}, _from, state) do
+    if state.mysql_conn, do: MyXQL.stop(state.mysql_conn)
+
+    new_config = [
+      host: params[:host],
+      port: params[:port],
+      username: params[:username],
+      password: params[:password],
+      database: params[:database],
+      timezone: params[:timezone]
+    ]
+
+    new_status = %{Status.initial() | state: :unconfigured}
+    broadcast(new_status)
+    {:reply, :ok, %{state | config: new_config, mysql_conn: nil, status: new_status}}
+  end
+
+  def handle_call(:reset, _from, state) do
+    if state.mysql_conn, do: MyXQL.stop(state.mysql_conn)
+    new_status = %{Status.initial() | state: :unconfigured}
+    broadcast(new_status)
+    {:reply, :ok, %{state | config: nil, mysql_conn: nil, status: new_status}}
   end
 
   def handle_call({:run, car_mapping, opts}, _from, state) do
@@ -193,9 +229,43 @@ defmodule TeslaMate.Import.TeslaLogger do
       {:ok, state} ->
         state = update_status(state, &Status.update_preflight_step(&1, :connecting, :complete))
         sync_preflight(parent, state)
+        run_preflight_validate_timezone(state, parent)
+    end
+  end
 
-        # Step 2: Read TeslaLogger data
+  defp run_preflight_validate_timezone(state, parent) do
+    state = update_status(state, &Status.update_preflight_step(&1, :validating_timezone, :running))
+    sync_preflight(parent, state)
+
+    timezone = state.config[:timezone] || "UTC"
+
+    case DateTime.now(timezone) do
+      {:ok, _} ->
+        state = update_status(state, &Status.update_preflight_step(&1, :validating_timezone, :complete, timezone))
+        sync_preflight(parent, state)
+        run_preflight_check_schema(state, parent)
+
+      {:error, _} ->
+        detail = "Unknown timezone: #{timezone}"
+        state = update_status(state, &Status.update_preflight_step(&1, :validating_timezone, {:error, detail}, detail))
+        update_status(state, &Status.set_state(&1, {:error, detail}))
+    end
+  end
+
+  defp run_preflight_check_schema(state, parent) do
+    state = update_status(state, &Status.update_preflight_step(&1, :checking_schema, :running))
+    sync_preflight(parent, state)
+
+    case MysqlReader.check_schema(state.mysql_conn) do
+      :ok ->
+        state = update_status(state, &Status.update_preflight_step(&1, :checking_schema, :complete))
+        sync_preflight(parent, state)
         run_preflight_read_source(state, parent)
+
+      {:error, reason} ->
+        Logger.error("Preflight schema check failed: #{reason}")
+        state = update_status(state, &Status.update_preflight_step(&1, :checking_schema, {:error, reason}, reason))
+        update_status(state, &Status.set_state(&1, {:error, reason}))
     end
   end
 
@@ -203,7 +273,7 @@ defmodule TeslaMate.Import.TeslaLogger do
     state = update_status(state, &Status.update_preflight_step(&1, :reading_source, :running))
     sync_preflight(parent, state)
 
-    case MysqlReader.preflight_check(state.mysql_conn) do
+    case MysqlReader.read_source_info(state.mysql_conn) do
       {:ok, car_info} ->
         count = length(car_info)
         detail = "Found #{count} car(s)"
@@ -211,7 +281,7 @@ defmodule TeslaMate.Import.TeslaLogger do
 
         Enum.each(car_info, fn c ->
           if c["vin"] && c["vin"] != "" do
-            Logger.info("  Car #{c["id"]}: VIN #{c["vin"]} (#{c["display_name"]})")
+            Logger.info("  Car #{c["id"]}: VIN #{c["vin"]} (#{c["display_name"]}), #{c["drive_count"]} drives, #{c["charge_count"]} charges")
           else
             Logger.warning("  Car #{c["id"]}: No VIN found (#{c["display_name"]})")
           end
@@ -220,8 +290,6 @@ defmodule TeslaMate.Import.TeslaLogger do
         state = update_status(state, &Status.update_preflight_step(&1, :reading_source, :complete, detail))
         state = update_status(state, fn s -> %{s | mysql_car_info: car_info} end)
         sync_preflight(parent, state)
-
-        # Step 3: Check TeslaMate data
         run_preflight_check_target(state, parent)
 
       {:error, reason} ->
@@ -235,7 +303,6 @@ defmodule TeslaMate.Import.TeslaLogger do
     state = update_status(state, &Status.update_preflight_step(&1, :checking_target, :running))
     sync_preflight(parent, state)
 
-    # For each car with a VIN, check if TeslaMate already has data
     {car_info_with_tm, any_has_data} =
       Enum.map_reduce(state.status.mysql_car_info, false, fn car_info, has_data_acc ->
         vin = car_info["vin"]

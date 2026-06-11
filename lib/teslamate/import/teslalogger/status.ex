@@ -22,7 +22,8 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
         }
 
   @type state ::
-          :idle
+          :unconfigured
+          | :idle
           | :preflight
           | :running
           | :complete
@@ -41,7 +42,7 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
           geocoding_lookups: non_neg_integer()
         }
 
-  defstruct state: :idle,
+  defstruct state: :unconfigured,
             current_step: nil,
             steps: [],
             preflight_steps: [],
@@ -64,7 +65,7 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
     :validation
   ]
 
-  @preflight_step_names [:connecting, :reading_source, :checking_target]
+  @preflight_step_names [:connecting, :validating_timezone, :checking_schema, :reading_source, :checking_target]
 
   def initial do
     steps =

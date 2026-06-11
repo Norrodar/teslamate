@@ -9,13 +9,10 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
   @impl true
   def mount(_params, %{"settings" => _}, socket) do
     if TLImport.enabled?() do
-      if connected?(socket) do
-        :ok = TLImport.subscribe()
-        # preflight may return {:error, :busy} if already running
-        _result = TLImport.preflight()
-      end
+      if connected?(socket), do: TLImport.subscribe()
 
       status = TLImport.get_status()
+      env_config = Application.get_env(:teslamate, :teslalogger_import, [])
 
       socket =
         socket
@@ -26,6 +23,12 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         |> assign(car_vid: "")
         |> assign(import_mode: "clean")
         |> assign(show_destructive_warning: false)
+        |> assign(conn_host: env_config[:host] || "")
+        |> assign(conn_port: to_string(env_config[:port] || "3306"))
+        |> assign(conn_user: env_config[:username] || "")
+        |> assign(conn_password: env_config[:password] || "")
+        |> assign(conn_database: env_config[:database] || "teslalogger")
+        |> assign(conn_timezone: env_config[:timezone] || "Europe/Berlin")
 
       {:ok, socket}
     else
@@ -34,6 +37,39 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
   end
 
   @impl true
+  def handle_event("update_conn_field", %{"field" => field, "value" => value}, socket) do
+    assign_key = String.to_existing_atom("conn_#{field}")
+    {:noreply, assign(socket, assign_key, value)}
+  rescue
+    ArgumentError -> {:noreply, socket}
+  end
+
+  def handle_event("test_connection", _params, socket) do
+    port =
+      case Integer.parse(socket.assigns.conn_port) do
+        {p, _} -> p
+        :error -> 3306
+      end
+
+    params = [
+      host: socket.assigns.conn_host,
+      port: port,
+      username: socket.assigns.conn_user,
+      password: socket.assigns.conn_password,
+      database: socket.assigns.conn_database,
+      timezone: socket.assigns.conn_timezone
+    ]
+
+    :ok = TLImport.configure(params)
+    :ok = TLImport.preflight()
+    {:noreply, socket}
+  end
+
+  def handle_event("reset_connection", _params, socket) do
+    :ok = TLImport.reset()
+    {:noreply, socket}
+  end
+
   def handle_event("start_import", _params, socket) do
     mode = socket.assigns.import_mode
 
@@ -146,8 +182,104 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
     <h2 class="title is-4">TeslaLogger Import</h2>
 
-    <%!-- Preflight Check Box --%>
-    <%= if @status.preflight_steps != [] do %>
+    <%!-- Step 1: Connection Form (shown when unconfigured or preflight failed before any import step) --%>
+    <%= if @status.state == :unconfigured or
+           (match?({:error, _}, @status.state) and @status.current_step == nil and
+            not preflight_passed?(@status.preflight_steps)) do %>
+      <div class="box mb-4">
+        <h3 class="title is-5">Database Connection</h3>
+        <p class="mb-4 has-text-grey">Enter the connection details for your TeslaLogger MySQL database.</p>
+
+        <div class="columns">
+          <div class="column is-two-thirds">
+            <div class="field">
+              <label class="label">Host</label>
+              <div class="control">
+                <input class="input" type="text" placeholder="localhost"
+                       value={@conn_host}
+                       phx-keyup="update_conn_field" phx-value-field="host" phx-debounce="300" />
+              </div>
+            </div>
+          </div>
+          <div class="column">
+            <div class="field">
+              <label class="label">Port</label>
+              <div class="control">
+                <input class="input" type="text" placeholder="3306"
+                       value={@conn_port}
+                       phx-keyup="update_conn_field" phx-value-field="port" phx-debounce="300" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="columns">
+          <div class="column">
+            <div class="field">
+              <label class="label">Username</label>
+              <div class="control">
+                <input class="input" type="text" placeholder="root"
+                       value={@conn_user}
+                       phx-keyup="update_conn_field" phx-value-field="user" phx-debounce="300" />
+              </div>
+            </div>
+          </div>
+          <div class="column">
+            <div class="field">
+              <label class="label">Password</label>
+              <div class="control">
+                <input class="input" type="password" placeholder="••••••••"
+                       value={@conn_password}
+                       phx-keyup="update_conn_field" phx-value-field="password" phx-debounce="300" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="columns">
+          <div class="column">
+            <div class="field">
+              <label class="label">Database</label>
+              <div class="control">
+                <input class="input" type="text" placeholder="teslalogger"
+                       value={@conn_database}
+                       phx-keyup="update_conn_field" phx-value-field="database" phx-debounce="300" />
+              </div>
+            </div>
+          </div>
+          <div class="column">
+            <div class="field">
+              <label class="label">Timezone</label>
+              <div class="control">
+                <input class="input" type="text" placeholder="Europe/Berlin"
+                       value={@conn_timezone}
+                       phx-keyup="update_conn_field" phx-value-field="timezone" phx-debounce="300" />
+              </div>
+              <p class="help">IANA timezone of your TeslaLogger data (e.g. Europe/Berlin)</p>
+            </div>
+          </div>
+        </div>
+
+        <%= if match?({:error, _}, @status.state) and not preflight_passed?(@status.preflight_steps) do %>
+          <div class="notification is-danger is-light mb-3 py-2 px-3">
+            <strong>Connection failed:</strong> <%= elem(@status.state, 1) %>
+          </div>
+        <% end %>
+
+        <div class="field mt-4">
+          <div class="control">
+            <button class="button is-info is-fullwidth" phx-click="test_connection"
+                    phx-disable-with="Testing...">
+              <span class="icon"><span class="mdi mdi-connection"></span></span>
+              <span>Test Connection</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    <% end %>
+
+    <%!-- Preflight Check Box (shown while running or after completing) --%>
+    <%= if @status.preflight_steps != [] and @status.state != :unconfigured do %>
       <div class="box mb-4">
         <div class="is-flex is-justify-content-space-between is-align-items-center mb-3">
           <h3 class="title is-5 mb-0">Preflight Check</h3>
@@ -179,9 +311,12 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           </div>
         <% end %>
 
-        <%= if match?({:error, _}, @status.state) and @status.current_step == nil do %>
-          <div class="notification is-danger is-light mt-3 mb-0 py-2 px-3">
-            <strong>Preflight failed:</strong> <%= elem(@status.state, 1) %>
+        <%= if @status.state == :idle do %>
+          <div class="mt-3">
+            <button class="button is-small is-light" phx-click="reset_connection">
+              <span class="icon"><span class="mdi mdi-pencil"></span></span>
+              <span>Change Connection</span>
+            </button>
           </div>
         <% end %>
       </div>
@@ -215,6 +350,20 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                       <span>VIN: <em>Not found — enter manually below</em></span>
                     </span>
                   <% end %>
+                </p>
+
+                <p class="mb-1">
+                  <span class="icon-text">
+                    <span class="icon has-text-grey"><span class="mdi mdi-chart-line"></span></span>
+                    <span class="has-text-grey">
+                      TeslaLogger: <%= car_info["drive_count"] || 0 %> drives,
+                      <%= car_info["charge_count"] || 0 %> charges,
+                      <%= car_info["pos_count"] || 0 %> positions
+                      <%= if car_info["data_from"] do %>
+                        (<%= format_date(car_info["data_from"]) %> – <%= format_date(car_info["data_to"]) %>)
+                      <% end %>
+                    </span>
+                  </span>
                 </p>
 
                 <p class="mb-0">
@@ -536,7 +685,13 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
     Enum.all?(steps, fn s -> s.status == :complete end)
   end
 
+  defp preflight_passed?(steps) do
+    steps != [] and preflight_all_complete?(steps)
+  end
+
   defp preflight_step_label(:connecting), do: "Connecting to MySQL"
+  defp preflight_step_label(:validating_timezone), do: "Validating timezone"
+  defp preflight_step_label(:checking_schema), do: "Checking database schema"
   defp preflight_step_label(:reading_source), do: "Reading TeslaLogger data"
   defp preflight_step_label(:checking_target), do: "Checking TeslaMate database"
   defp preflight_step_label(name), do: Atom.to_string(name)
@@ -548,6 +703,11 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
       true -> "is-success"
     end
   end
+
+  defp format_date(%NaiveDateTime{} = dt), do: NaiveDateTime.to_date(dt) |> Date.to_string()
+  defp format_date(%DateTime{} = dt), do: DateTime.to_date(dt) |> Date.to_string()
+  defp format_date(%Date{} = d), do: Date.to_string(d)
+  defp format_date(_), do: "?"
 
   defp format_tm_data_counts(counts) when map_size(counts) == 0, do: "No existing data"
 

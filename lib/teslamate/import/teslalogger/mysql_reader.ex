@@ -17,34 +17,8 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
 
   @required_tables ~w(cars pos drivestate charging chargingstate state car_version)
 
-  @doc """
-  Checks that the MySQL database is a valid TeslaLogger database:
-  - All required tables exist
-  - At least one car is present
-  - At least one position row exists
-  - Reads car info (id, vin, display_name) for the UI
-  Returns {:ok, car_info_list} or {:error, reason}.
-  """
-  def preflight_check(conn) do
-    with :ok <- check_required_tables(conn),
-         :ok <- check_has_cars(conn),
-         :ok <- check_has_data(conn),
-         {:ok, car_info} <- read_car_info(conn) do
-      {:ok, car_info}
-    end
-  end
-
-  defp read_car_info(conn) do
-    case MyXQL.query(conn, "SELECT id, vin, display_name FROM cars") do
-      {:ok, %MyXQL.Result{rows: rows, columns: columns}} ->
-        {:ok, rows_to_maps(columns, rows)}
-
-      {:error, reason} ->
-        {:error, "Failed to read car info: #{inspect(reason)}"}
-    end
-  end
-
-  defp check_required_tables(conn) do
+  @doc "Verifies that all required TeslaLogger tables are present in the database."
+  def check_schema(conn) do
     case MyXQL.query(conn, "SHOW TABLES") do
       {:ok, %MyXQL.Result{rows: rows}} ->
         existing = rows |> List.flatten() |> MapSet.new()
@@ -58,6 +32,63 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
       {:error, reason} ->
         {:error, "Failed to list tables: #{inspect(reason)}"}
     end
+  end
+
+  @doc """
+  Reads car info and per-car data stats (drive count, charge count, position count,
+  date range of first/last drive). Returns {:ok, car_info_list} or {:error, reason}.
+  """
+  def read_source_info(conn) do
+    with :ok <- check_has_cars(conn),
+         :ok <- check_has_data(conn),
+         {:ok, cars} <- read_car_info(conn) do
+      cars_with_stats =
+        Enum.map(cars, fn car ->
+          stats = read_car_stats(conn, car["id"])
+          Map.merge(car, stats)
+        end)
+
+      {:ok, cars_with_stats}
+    end
+  end
+
+  defp read_car_info(conn) do
+    case MyXQL.query(conn, "SELECT id, vin, display_name FROM cars") do
+      {:ok, %MyXQL.Result{rows: rows, columns: columns}} ->
+        {:ok, rows_to_maps(columns, rows)}
+
+      {:error, reason} ->
+        {:error, "Failed to read car info: #{inspect(reason)}"}
+    end
+  end
+
+  defp read_car_stats(conn, car_id) do
+    drive_stats =
+      case MyXQL.query(
+             conn,
+             "SELECT COUNT(*), MIN(StartDate), MAX(EndDate) FROM drivestate WHERE CarID = ?",
+             [car_id]
+           ) do
+        {:ok, %MyXQL.Result{rows: [[count, min_date, max_date]]}} ->
+          %{"drive_count" => count || 0, "data_from" => min_date, "data_to" => max_date}
+
+        _ ->
+          %{"drive_count" => 0, "data_from" => nil, "data_to" => nil}
+      end
+
+    charge_count =
+      case MyXQL.query(conn, "SELECT COUNT(*) FROM chargingstate WHERE CarID = ?", [car_id]) do
+        {:ok, %MyXQL.Result{rows: [[count]]}} -> count || 0
+        _ -> 0
+      end
+
+    pos_count =
+      case MyXQL.query(conn, "SELECT COUNT(*) FROM pos WHERE CarID = ?", [car_id]) do
+        {:ok, %MyXQL.Result{rows: [[count]]}} -> count || 0
+        _ -> 0
+      end
+
+    Map.merge(drive_stats, %{"charge_count" => charge_count, "pos_count" => pos_count})
   end
 
   defp check_has_cars(conn) do
