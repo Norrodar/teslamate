@@ -5,7 +5,15 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
 
   @type import_mode :: :clean | :merge_tm_priority | :merge_tl_priority
 
-  @type phase :: :pending | :reading | :mapping | :validating | :filtering | :deleting | :inserting | :done
+  @type phase ::
+          :pending
+          | :reading
+          | :mapping
+          | :validating
+          | :filtering
+          | :deleting
+          | :inserting
+          | :done
 
   @type preflight_step :: %{
           name: atom(),
@@ -29,6 +37,8 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
           | :complete
           | {:error, term()}
 
+  @type preview :: nil | :loading | {:ok, [map()]} | {:error, String.t()}
+
   @type t :: %__MODULE__{
           state: state(),
           current_step: atom() | nil,
@@ -39,10 +49,11 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
           import_mode: import_mode(),
           mysql_car_info: [map()],
           tm_has_data: boolean(),
-          geocoding_lookups: non_neg_integer()
+          geocoding_lookups: non_neg_integer(),
+          preview: preview()
         }
 
-  defstruct state: :unconfigured,
+  defstruct state: :idle,
             current_step: nil,
             steps: [],
             preflight_steps: [],
@@ -51,7 +62,8 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
             import_mode: :clean,
             mysql_car_info: [],
             tm_has_data: false,
-            geocoding_lookups: 0
+            geocoding_lookups: 0,
+            preview: nil
 
   @step_names [
     :cars,
@@ -65,7 +77,13 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
     :validation
   ]
 
-  @preflight_step_names [:connecting, :validating_timezone, :checking_schema, :reading_source, :checking_target]
+  @preflight_step_names [
+    :connecting,
+    :validating_timezone,
+    :checking_schema,
+    :reading_source,
+    :checking_target
+  ]
 
   def initial do
     steps =
@@ -129,11 +147,14 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
     %{status | steps: steps}
   end
 
-  def complete_step(%__MODULE__{} = status, step_name) do
+  def complete_step(%__MODULE__{} = status, step_name, imported \\ nil) do
     steps =
       Enum.map(status.steps, fn
-        %{name: ^step_name} = step -> %{step | status: :complete, phase: :done, imported: step.total}
-        step -> step
+        %{name: ^step_name} = step ->
+          %{step | status: :complete, phase: :done, imported: imported || step.total}
+
+        step ->
+          step
       end)
 
     %{status | steps: steps}
@@ -151,6 +172,10 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
 
   def set_geocoding_lookups(%__MODULE__{} = status, count) do
     %{status | geocoding_lookups: count}
+  end
+
+  def set_preview(%__MODULE__{} = status, preview) do
+    %{status | preview: preview}
   end
 
   def add_warning(%__MODULE__{} = status, warning) do

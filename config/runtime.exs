@@ -183,13 +183,15 @@ if config_env() != :test do
 
   # Always start the TeslaLogger import GenServer. Connection details can be provided via
   # env vars (pre-filled in the UI) or configured manually in the web UI.
+  teslalogger_port =
+    case System.get_env("TESLALOGGER_MYSQL_PORT") do
+      nil -> nil
+      p -> String.to_integer(p)
+    end
+
   config :teslamate, :teslalogger_import,
     host: System.get_env("TESLALOGGER_MYSQL_HOST"),
-    port:
-      case System.get_env("TESLALOGGER_MYSQL_PORT") do
-        nil -> nil
-        p -> String.to_integer(p)
-      end,
+    port: teslalogger_port,
     username: System.get_env("TESLALOGGER_MYSQL_USER"),
     password: System.get_env("TESLALOGGER_MYSQL_PASSWORD"),
     database: System.get_env("TESLALOGGER_MYSQL_DATABASE"),

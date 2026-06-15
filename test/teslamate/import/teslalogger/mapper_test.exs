@@ -37,7 +37,8 @@ defmodule TeslaMate.Import.TeslaLogger.MapperTest do
       assert result.outside_temp == Decimal.from_float(18.3)
       assert result.battery_heater == false
       assert result.ideal_battery_range_km == Decimal.from_float(295.0)
-      assert result.rated_battery_range_km == Decimal.from_float(280.5)
+      # rated is intentionally fed from ideal_battery_range_km (TL's battery_range_km is static)
+      assert result.rated_battery_range_km == Decimal.from_float(295.0)
     end
 
     test "handles nil values" do
@@ -71,10 +72,15 @@ defmodule TeslaMate.Import.TeslaLogger.MapperTest do
         "Datum" => ~N[2023-06-15 14:30:00],
         "lat" => 52.5,
         "lng" => 13.4,
-        "speed" => nil, "power" => nil, "odometer" => nil,
-        "altitude" => nil, "battery_level" => nil,
-        "inside_temp" => nil, "outside_temp" => nil,
-        "battery_heater" => nil, "battery_range_km" => nil,
+        "speed" => nil,
+        "power" => nil,
+        "odometer" => nil,
+        "altitude" => nil,
+        "battery_level" => nil,
+        "inside_temp" => nil,
+        "outside_temp" => nil,
+        "battery_heater" => nil,
+        "battery_range_km" => nil,
         "ideal_battery_range_km" => nil
       }
 
@@ -114,9 +120,27 @@ defmodule TeslaMate.Import.TeslaLogger.MapperTest do
       }
 
       positions = [
-        %{odometer: 42000.0, ideal_battery_range_km: Decimal.new(300), rated_battery_range_km: Decimal.new(280), inside_temp: Decimal.new(22), outside_temp: nil},
-        %{odometer: 42025.0, ideal_battery_range_km: Decimal.new(290), rated_battery_range_km: Decimal.new(270), inside_temp: Decimal.new(23), outside_temp: nil},
-        %{odometer: 42050.0, ideal_battery_range_km: Decimal.new(270), rated_battery_range_km: Decimal.new(250), inside_temp: Decimal.new(24), outside_temp: nil}
+        %{
+          odometer: 42000.0,
+          ideal_battery_range_km: Decimal.new(300),
+          rated_battery_range_km: Decimal.new(280),
+          inside_temp: Decimal.new(22),
+          outside_temp: nil
+        },
+        %{
+          odometer: 42025.0,
+          ideal_battery_range_km: Decimal.new(290),
+          rated_battery_range_km: Decimal.new(270),
+          inside_temp: Decimal.new(23),
+          outside_temp: nil
+        },
+        %{
+          odometer: 42050.0,
+          ideal_battery_range_km: Decimal.new(270),
+          rated_battery_range_km: Decimal.new(250),
+          inside_temp: Decimal.new(24),
+          outside_temp: nil
+        }
       ]
 
       result = Mapper.enrich_drive(drive, positions)
@@ -141,7 +165,6 @@ defmodule TeslaMate.Import.TeslaLogger.MapperTest do
       row = %{
         "Datum" => ~N[2023-06-15 20:00:00],
         "battery_level" => 45,
-        "usable_battery_level" => 43,
         "charge_energy_added" => 12.5,
         "charger_power" => 11,
         "ideal_battery_range_km" => 180.0,
@@ -157,11 +180,11 @@ defmodule TeslaMate.Import.TeslaLogger.MapperTest do
       result = Mapper.map_charge(row, @timezone)
 
       assert result.battery_level == 45
-      assert result.usable_battery_level == 43
       assert result.charge_energy_added == Decimal.from_float(12.5)
       assert result.charger_power == 11
       assert result.ideal_battery_range_km == Decimal.from_float(180.0)
-      assert result.rated_battery_range_km == Decimal.from_float(175.0)
+      # rated is intentionally fed from ideal_battery_range_km (TL's battery_range_km is static)
+      assert result.rated_battery_range_km == Decimal.from_float(180.0)
       assert result.charger_voltage == 230
       assert result.charger_phases == 3
     end
@@ -196,7 +219,12 @@ defmodule TeslaMate.Import.TeslaLogger.MapperTest do
             {"driving", :online},
             {"charging", :online}
           ] do
-        row = %{"StartDate" => ~N[2023-06-15 12:00:00], "EndDate" => ~N[2023-06-15 13:00:00], "state" => input}
+        row = %{
+          "StartDate" => ~N[2023-06-15 12:00:00],
+          "EndDate" => ~N[2023-06-15 13:00:00],
+          "state" => input
+        }
+
         result = Mapper.map_state(row, @timezone)
         assert result.state == expected, "Expected #{input} to map to #{expected}"
       end

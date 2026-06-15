@@ -19,7 +19,8 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       inside_temp: to_decimal(row["inside_temp"]),
       outside_temp: to_decimal(row["outside_temp"]),
       battery_heater: to_boolean(row["battery_heater"]),
-      ideal_battery_range_km: to_decimal(row["ideal_battery_range_km"] || row["battery_range_km"]),
+      ideal_battery_range_km:
+        to_decimal(row["ideal_battery_range_km"] || row["battery_range_km"]),
       # TeslaLogger's battery_range_km is a static max-range value, not a dynamic rated range.
       # Use ideal_battery_range_km for both to avoid broken efficiency calculations.
       rated_battery_range_km: to_decimal(row["ideal_battery_range_km"] || row["battery_range_km"])
@@ -31,15 +32,16 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
   Each position gets the most recent TPMS reading at or before its timestamp.
   TPMS pressures are in bar (TeslaLogger stores bar).
   """
-  def merge_tpms(positions, []), do: positions
+  def merge_tpms(positions, [], _timezone), do: positions
 
-  def merge_tpms(positions, tpms_rows) do
-    # Convert TPMS rows to sorted list of {unix_seconds, pressures_map}
+  def merge_tpms(positions, tpms_rows, timezone) do
+    # Convert TPMS rows to sorted list of {unix_seconds, pressures_map}.
+    # Datum is local time and must go through the same TZ conversion as positions,
+    # otherwise readings are matched with a 1-2h offset.
     tpms_sorted =
       tpms_rows
       |> Enum.map(fn row ->
-        # Datum from MySQL is already a DateTime or NaiveDateTime
-        unix = datetime_to_unix(row["Datum"])
+        unix = row["Datum"] |> to_utc(timezone) |> datetime_to_unix()
 
         pressures = %{
           tpms_pressure_fl: to_decimal(row["tpms_fl"]),
@@ -83,11 +85,6 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
 
   defp datetime_to_unix(nil), do: nil
   defp datetime_to_unix(%DateTime{} = dt), do: DateTime.to_unix(dt, :second)
-
-  defp datetime_to_unix(%NaiveDateTime{} = ndt) do
-    ndt |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix(:second)
-  end
-
   defp datetime_to_unix(_), do: nil
 
   @doc "Maps a TeslaLogger drivestate row to TeslaMate drive attrs."
@@ -236,11 +233,12 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
         dc? = avg_power > 25
 
         Enum.map(charges, fn charge ->
-          %{charge |
-            fast_charger_present: dc?,
-            charger_phases: if(dc?, do: nil, else: charge.charger_phases || 1),
-            fast_charger_brand: if(dc?, do: charge.fast_charger_brand),
-            fast_charger_type: if(dc?, do: charge.fast_charger_type)
+          %{
+            charge
+            | fast_charger_present: dc?,
+              charger_phases: if(dc?, do: nil, else: charge.charger_phases || 1),
+              fast_charger_brand: if(dc?, do: charge.fast_charger_brand),
+              fast_charger_type: if(dc?, do: charge.fast_charger_type)
           }
         end)
     end
@@ -277,14 +275,16 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       end
     end)
     |> Decimal.round(2)
-    |> case do
-      %Decimal{} = d -> if Decimal.compare(d, 0) == :gt, do: d, else: nil
-    end
+    |> then(fn d -> if Decimal.compare(d, 0) == :gt, do: d, else: nil end)
   end
 
   # Effective charging power in kW for a charge row.
   # Prefers current * voltage * phases (more accurate), falls back to charger_power.
-  defp effective_power(%{charger_actual_current: amps, charger_voltage: volts, charger_phases: phases})
+  defp effective_power(%{
+         charger_actual_current: amps,
+         charger_voltage: volts,
+         charger_phases: phases
+       })
        when is_integer(amps) and is_integer(volts) and amps > 0 and volts > 0 do
     p = (phases || 1) |> max(1)
     Decimal.div(Decimal.new(amps * volts * p), Decimal.new(1000))
@@ -342,7 +342,7 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
     updates
     |> Enum.chunk_every(2, 1, [nil])
     |> Enum.map(fn
-      [current, nil] -> current
+      [current, nil] -> Map.put(current, :end_date, nil)
       [current, next] -> Map.put(current, :end_date, next.start_date)
     end)
   end
@@ -365,7 +365,9 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
       |> Enum.reject(&is_nil/1)
 
     case values do
-      [] -> nil
+      [] ->
+        nil
+
       vals ->
         sum = Enum.reduce(vals, Decimal.new(0), &Decimal.add/2)
         Decimal.round(Decimal.div(sum, Decimal.new(length(vals))), 2)
@@ -392,9 +394,15 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
 
   defp to_utc(%NaiveDateTime{} = ndt, timezone) do
     case DateTime.from_naive(ndt, timezone) do
-      {:ok, dt} -> shift_to_utc(dt)
-      {:ambiguous, dt, _} -> shift_to_utc(dt)
-      {:gap, _, dt} -> shift_to_utc(dt)
+      {:ok, dt} ->
+        shift_to_utc(dt)
+
+      {:ambiguous, dt, _} ->
+        shift_to_utc(dt)
+
+      {:gap, _, dt} ->
+        shift_to_utc(dt)
+
       {:error, reason} ->
         Logger.warning("Failed to convert #{ndt} in timezone #{timezone}: #{inspect(reason)}")
         nil

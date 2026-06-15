@@ -7,10 +7,10 @@ defmodule TeslaMate.Import.TeslaLogger do
 
   import Ecto.Query
 
-  alias __MODULE__.{Status, MysqlReader, Mapper, Validator, Writer}
+  alias __MODULE__.{Status, MysqlReader, Mapper, Preview, Validator, Writer}
   alias TeslaMate.{Repo, Repair}
   alias TeslaMate.Log
-  alias TeslaMate.Log.Car
+  alias TeslaMate.Log.{Car, ChargingProcess, Drive, ImportMetadata, Position}
   alias TeslaMate.Settings.CarSettings
 
   defstruct [
@@ -18,19 +18,28 @@ defmodule TeslaMate.Import.TeslaLogger do
     :mysql_conn,
     status: Status.initial(),
     car_mapping: %{},
-    date_to_pos_id: %{}
+    date_to_pos_id: %{},
+    pos_attrs_by_date: %{}
   ]
 
   @name __MODULE__
   @topic "#{@name}/state"
+
+  # Buffer around drive/charge ranges so boundary positions (needed for
+  # start/end_position_id and charging_process position_id) are kept.
+  @active_range_buffer_seconds 60
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, @name))
   end
 
   def get_status, do: GenServer.call(@name, :get_status)
-  def run(car_mapping \\ %{}, opts \\ []), do: GenServer.call(@name, {:run, car_mapping, opts}, :infinity)
+
+  def run(car_mapping \\ %{}, opts \\ []),
+    do: GenServer.call(@name, {:run, car_mapping, opts}, :infinity)
+
   def preflight, do: GenServer.call(@name, :preflight, :infinity)
+  def preview, do: GenServer.call(@name, :preview)
   def configure(params), do: GenServer.call(@name, {:configure, params})
   def reset, do: GenServer.call(@name, :reset)
   def enabled?, do: is_pid(Process.whereis(@name))
@@ -38,17 +47,17 @@ defmodule TeslaMate.Import.TeslaLogger do
 
   @impl true
   def init(opts) do
+    # Import/preflight tasks are linked — trap exits so a task crash is reported
+    # via status instead of taking down this server (and its config/connection).
+    Process.flag(:trap_exit, true)
+
     config = Keyword.get(opts, :config)
-    # If all config values are nil (no env vars set), start unconfigured.
-    # Otherwise pre-fill config so env-var defaults are used.
+    # Env vars only pre-fill the connection form; the UI flow always starts
+    # unconfigured and the user confirms via "Test Connection".
     effective_config =
       if config && Enum.any?(config, fn {_, v} -> v != nil end), do: config, else: nil
 
-    status =
-      if effective_config,
-        do: Status.initial(),
-        else: %{Status.initial() | state: :unconfigured}
-
+    status = %{Status.initial() | state: :unconfigured}
     {:ok, %__MODULE__{config: effective_config, status: status}}
   end
 
@@ -66,8 +75,26 @@ defmodule TeslaMate.Import.TeslaLogger do
     end
   end
 
+  def handle_call(:preview, _from, state) do
+    cond do
+      state.status.state != :idle ->
+        {:reply, {:error, :not_ready}, state}
+
+      state.status.preview == :loading ->
+        {:reply, :ok, state}
+
+      state.mysql_conn == nil ->
+        {:reply, {:error, :not_connected}, state}
+
+      true ->
+        send(self(), :run_preview)
+        state = update_status(state, &Status.set_preview(&1, :loading))
+        {:reply, :ok, state}
+    end
+  end
+
   def handle_call({:configure, params}, _from, state) do
-    if state.mysql_conn, do: MyXQL.stop(state.mysql_conn)
+    stop_mysql(state.mysql_conn)
 
     new_config = [
       host: params[:host],
@@ -84,21 +111,28 @@ defmodule TeslaMate.Import.TeslaLogger do
   end
 
   def handle_call(:reset, _from, state) do
-    if state.mysql_conn, do: MyXQL.stop(state.mysql_conn)
+    stop_mysql(state.mysql_conn)
     new_status = %{Status.initial() | state: :unconfigured}
     broadcast(new_status)
     {:reply, :ok, %{state | config: nil, mysql_conn: nil, status: new_status}}
   end
 
   def handle_call({:run, car_mapping, opts}, _from, state) do
-    if state.status.state in [:running, :preflight] do
-      {:reply, {:error, :already_running}, state}
-    else
-      mode = Keyword.get(opts, :mode, :clean)
-      state = %{state | car_mapping: car_mapping}
-      state = update_status(state, fn s -> %{s | import_mode: mode} end)
-      send(self(), :start_import)
-      {:reply, :ok, state}
+    cond do
+      state.status.state in [:running, :preflight] ->
+        {:reply, {:error, :already_running}, state}
+
+      state.config == nil ->
+        {:reply, {:error, :not_configured}, state}
+
+      true ->
+        mode = Keyword.get(opts, :mode, :clean)
+        # Fresh position lookup per run — stale entries from a previous run would
+        # point at deleted rows.
+        state = %{state | car_mapping: car_mapping, date_to_pos_id: %{}}
+        state = update_status(state, fn s -> %{s | import_mode: mode} end)
+        send(self(), :start_import)
+        {:reply, :ok, state}
     end
   end
 
@@ -125,8 +159,46 @@ defmodule TeslaMate.Import.TeslaLogger do
     {:noreply, %{state | status: result_state.status, mysql_conn: result_state.mysql_conn}}
   end
 
+  def handle_info(:run_preview, state) do
+    parent = self()
+    conn = state.mysql_conn
+    timezone = state.config[:timezone]
+    car_info = state.status.mysql_car_info
+
+    {:ok, pid} =
+      Task.start_link(fn ->
+        result =
+          Enum.reduce_while(car_info, {:ok, []}, fn info, {:ok, acc} ->
+            case Preview.build(conn, info, timezone) do
+              {:ok, preview} -> {:cont, {:ok, [preview | acc]}}
+              {:error, reason} -> {:halt, {:error, inspect(reason)}}
+            end
+          end)
+
+        result =
+          case result do
+            {:ok, previews} -> {:ok, Enum.reverse(previews)}
+            error -> error
+          end
+
+        send(parent, {:preview_done, result})
+      end)
+
+    Process.monitor(pid)
+    {:noreply, state}
+  end
+
+  def handle_info({:preview_done, result}, state) do
+    {:noreply, update_status(state, &Status.set_preview(&1, result))}
+  end
+
   def handle_info(:start_import, state) do
     parent = self()
+
+    # Mark :running in the GenServer's own state BEFORE spawning — the task only
+    # mutates its private copy, so without this the busy-guard in handle_call
+    # would wave through a second concurrent import.
+    state = update_status(state, &Status.set_state(&1, :running))
 
     {:ok, pid} =
       Task.start_link(fn ->
@@ -140,26 +212,45 @@ defmodule TeslaMate.Import.TeslaLogger do
 
   def handle_info({:import_done, result_state}, state) do
     # Merge back status and date_to_pos_id — preserve car_mapping etc.
-    {:noreply, %{state | status: result_state.status, date_to_pos_id: result_state.date_to_pos_id}}
+    {:noreply,
+     %{state | status: result_state.status, date_to_pos_id: result_state.date_to_pos_id}}
   end
 
-  # Handle Task crash — reset state so GenServer doesn't get stuck
-  def handle_info({:DOWN, _ref, :process, _pid, :normal}, state) do
-    {:noreply, state}
+  # Task crashes arrive as :EXIT (tasks are linked, exits are trapped) and as
+  # :DOWN (monitored). Whichever arrives first records the error; the second
+  # becomes a no-op because the state is no longer :running/:preflight.
+  def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
+  def handle_info({:EXIT, _pid, reason}, state), do: {:noreply, handle_task_crash(state, reason)}
+  def handle_info({:DOWN, _ref, :process, _pid, :normal}, state), do: {:noreply, state}
+
+  def handle_info({:DOWN, _ref, :process, _pid, reason}, state),
+    do: {:noreply, handle_task_crash(state, reason)}
+
+  defp handle_task_crash(state, reason) do
+    cond do
+      state.status.state in [:running, :preflight] ->
+        Logger.error("Import/preflight task crashed: #{inspect(reason)}")
+        update_status(state, &Status.set_state(&1, {:error, "Task crashed: #{inspect(reason)}"}))
+
+      state.status.preview == :loading ->
+        Logger.error("Preview task crashed: #{inspect(reason)}")
+
+        update_status(
+          state,
+          &Status.set_preview(&1, {:error, "Preview crashed: #{inspect(reason)}"})
+        )
+
+      true ->
+        state
+    end
   end
 
-  def handle_info({:DOWN, _ref, :process, _pid, reason}, state) do
-    Logger.error("Import/preflight task crashed: #{inspect(reason)}")
+  defp stop_mysql(nil), do: :ok
 
-    new_status =
-      if state.status.state in [:running, :preflight] do
-        %{state.status | state: {:error, "Task crashed: #{inspect(reason)}"}}
-      else
-        state.status
-      end
-
-    broadcast(new_status)
-    {:noreply, %{state | status: new_status}}
+  defp stop_mysql(conn) do
+    if Process.alive?(conn), do: GenServer.stop(conn)
+  catch
+    :exit, _ -> :ok
   end
 
   ## Import Orchestration
@@ -223,7 +314,13 @@ defmodule TeslaMate.Import.TeslaLogger do
     case connect_mysql(state) do
       {:error, reason, state} ->
         detail = "MySQL connection failed: #{inspect(reason)}"
-        state = update_status(state, &Status.update_preflight_step(&1, :connecting, {:error, detail}, detail))
+
+        state =
+          update_status(
+            state,
+            &Status.update_preflight_step(&1, :connecting, {:error, detail}, detail)
+          )
+
         update_status(state, &Status.set_state(&1, {:error, detail}))
 
       {:ok, state} ->
@@ -234,20 +331,33 @@ defmodule TeslaMate.Import.TeslaLogger do
   end
 
   defp run_preflight_validate_timezone(state, parent) do
-    state = update_status(state, &Status.update_preflight_step(&1, :validating_timezone, :running))
+    state =
+      update_status(state, &Status.update_preflight_step(&1, :validating_timezone, :running))
+
     sync_preflight(parent, state)
 
     timezone = state.config[:timezone] || "UTC"
 
     case DateTime.now(timezone) do
       {:ok, _} ->
-        state = update_status(state, &Status.update_preflight_step(&1, :validating_timezone, :complete, timezone))
+        state =
+          update_status(
+            state,
+            &Status.update_preflight_step(&1, :validating_timezone, :complete, timezone)
+          )
+
         sync_preflight(parent, state)
         run_preflight_check_schema(state, parent)
 
       {:error, _} ->
         detail = "Unknown timezone: #{timezone}"
-        state = update_status(state, &Status.update_preflight_step(&1, :validating_timezone, {:error, detail}, detail))
+
+        state =
+          update_status(
+            state,
+            &Status.update_preflight_step(&1, :validating_timezone, {:error, detail}, detail)
+          )
+
         update_status(state, &Status.set_state(&1, {:error, detail}))
     end
   end
@@ -258,13 +368,21 @@ defmodule TeslaMate.Import.TeslaLogger do
 
     case MysqlReader.check_schema(state.mysql_conn) do
       :ok ->
-        state = update_status(state, &Status.update_preflight_step(&1, :checking_schema, :complete))
+        state =
+          update_status(state, &Status.update_preflight_step(&1, :checking_schema, :complete))
+
         sync_preflight(parent, state)
         run_preflight_read_source(state, parent)
 
       {:error, reason} ->
         Logger.error("Preflight schema check failed: #{reason}")
-        state = update_status(state, &Status.update_preflight_step(&1, :checking_schema, {:error, reason}, reason))
+
+        state =
+          update_status(
+            state,
+            &Status.update_preflight_step(&1, :checking_schema, {:error, reason}, reason)
+          )
+
         update_status(state, &Status.set_state(&1, {:error, reason}))
     end
   end
@@ -281,20 +399,33 @@ defmodule TeslaMate.Import.TeslaLogger do
 
         Enum.each(car_info, fn c ->
           if c["vin"] && c["vin"] != "" do
-            Logger.info("  Car #{c["id"]}: VIN #{c["vin"]} (#{c["display_name"]}), #{c["drive_count"]} drives, #{c["charge_count"]} charges")
+            Logger.info(
+              "  Car #{c["id"]}: VIN #{c["vin"]} (#{c["display_name"]}), #{c["drive_count"]} drives, #{c["charge_count"]} charges"
+            )
           else
             Logger.warning("  Car #{c["id"]}: No VIN found (#{c["display_name"]})")
           end
         end)
 
-        state = update_status(state, &Status.update_preflight_step(&1, :reading_source, :complete, detail))
+        state =
+          update_status(
+            state,
+            &Status.update_preflight_step(&1, :reading_source, :complete, detail)
+          )
+
         state = update_status(state, fn s -> %{s | mysql_car_info: car_info} end)
         sync_preflight(parent, state)
         run_preflight_check_target(state, parent)
 
       {:error, reason} ->
         Logger.error("Preflight read failed: #{reason}")
-        state = update_status(state, &Status.update_preflight_step(&1, :reading_source, {:error, reason}, reason))
+
+        state =
+          update_status(
+            state,
+            &Status.update_preflight_step(&1, :reading_source, {:error, reason}, reason)
+          )
+
         update_status(state, &Status.set_state(&1, {:error, reason}))
     end
   end
@@ -305,34 +436,28 @@ defmodule TeslaMate.Import.TeslaLogger do
 
     {car_info_with_tm, any_has_data} =
       Enum.map_reduce(state.status.mysql_car_info, false, fn car_info, has_data_acc ->
-        vin = car_info["vin"]
-
-        try do
-          case Writer.check_tm_data_for_vin(vin) do
-            {:ok, nil} ->
-              enriched = Map.merge(car_info, %{"tm_car_id" => nil, "tm_data_counts" => nil})
-              {enriched, has_data_acc}
-
-            {:ok, %{tm_car_id: tm_id, tm_data_counts: counts}} ->
-              has_data = map_size(counts) > 0
-              enriched = Map.merge(car_info, %{"tm_car_id" => tm_id, "tm_data_counts" => counts})
-              {enriched, has_data_acc or has_data}
-          end
-        rescue
-          e ->
-            Logger.warning("Failed to check TM data for VIN #{inspect(vin)}: #{inspect(e)}")
+        case Writer.check_tm_data_for_vin(car_info["vin"]) do
+          {:ok, nil} ->
             enriched = Map.merge(car_info, %{"tm_car_id" => nil, "tm_data_counts" => nil})
             {enriched, has_data_acc}
+
+          {:ok, %{tm_car_id: tm_id, tm_data_counts: counts}} ->
+            has_data = map_size(counts) > 0
+            enriched = Map.merge(car_info, %{"tm_car_id" => tm_id, "tm_data_counts" => counts})
+            {enriched, has_data_acc or has_data}
         end
       end)
 
     detail = if any_has_data, do: "Existing TeslaMate data found", else: "No existing data"
 
-    state = update_status(state, fn s ->
-      %{s | mysql_car_info: car_info_with_tm, tm_has_data: any_has_data}
-    end)
+    state =
+      update_status(state, fn s ->
+        %{s | mysql_car_info: car_info_with_tm, tm_has_data: any_has_data}
+      end)
 
-    state = update_status(state, &Status.update_preflight_step(&1, :checking_target, :complete, detail))
+    state =
+      update_status(state, &Status.update_preflight_step(&1, :checking_target, :complete, detail))
+
     update_status(state, &Status.set_state(&1, :idle))
   end
 
@@ -341,16 +466,14 @@ defmodule TeslaMate.Import.TeslaLogger do
     send(parent, {:preflight_update, state.status})
   end
 
-  # Legacy preflight for ensure_connected path (import without prior preflight)
+  # Minimal preflight for the ensure_connected path (import without prior UI preflight)
   defp run_preflight_check(state) do
-    Logger.info("Running preflight check on TeslaLogger database...")
-
-    case MysqlReader.preflight_check(state.mysql_conn) do
-      {:ok, car_info} ->
-        Logger.info("Preflight check passed — found #{length(car_info)} car(s)")
-        state = update_status(state, fn s -> %{s | mysql_car_info: car_info} end)
-        {:ok, state}
-
+    with :ok <- MysqlReader.check_schema(state.mysql_conn),
+         {:ok, car_info} <- MysqlReader.read_source_info(state.mysql_conn) do
+      Logger.info("Preflight check passed — found #{length(car_info)} car(s)")
+      state = update_status(state, fn s -> %{s | mysql_car_info: car_info} end)
+      {:ok, state}
+    else
       {:error, reason} ->
         Logger.error("Preflight check failed: #{reason}")
         {:error, reason, state}
@@ -372,7 +495,9 @@ defmodule TeslaMate.Import.TeslaLogger do
               |> Enum.map(fn {k, v} -> "#{k}: #{v}" end)
               |> Enum.join(", ")
 
-            msg = "Car #{car.vin || car.id} already has data (#{counts_str}). Use a merge mode or empty the database first."
+            msg =
+              "Car #{car.vin || car.id} already has data (#{counts_str}). Use a merge mode or empty the database first."
+
             Logger.error("Mode precheck failed: #{msg}")
             {:halt, {:error, msg, s}}
         end
@@ -407,28 +532,37 @@ defmodule TeslaMate.Import.TeslaLogger do
         state = update_status(state, &Status.start_step(&1, :cars, car_count))
 
         car_mapping =
-          Enum.reduce_while(tl_cars, {:ok, %{}}, fn tl_car, {:ok, acc} ->
+          Enum.reduce_while(tl_cars, {:ok, %{}, []}, fn tl_car, {:ok, acc, skipped} ->
             tl_car_id = tl_car["id"]
 
             case create_or_find_car(tl_car, state.car_mapping) do
               {:ok, car} ->
-                Logger.info("Mapped TeslaLogger car #{tl_car_id} -> TeslaMate car #{car.id} (#{car.name || car.vin})")
-                {:cont, {:ok, Map.put(acc, tl_car_id, car)}}
+                Logger.info(
+                  "Mapped TeslaLogger car #{tl_car_id} -> TeslaMate car #{car.id} (#{car.name || car.vin})"
+                )
+
+                {:cont, {:ok, Map.put(acc, tl_car_id, car), skipped}}
 
               {:error, :vin_required} ->
-                msg = "TeslaLogger car #{tl_car_id} (#{tl_car["display_name"]}) has no VIN. Please provide a VIN in the import form."
+                msg =
+                  "TeslaLogger car #{tl_car_id} (#{tl_car["display_name"]}) has no VIN. Please provide a VIN in the import form."
+
                 Logger.error(msg)
                 {:halt, {:error, msg}}
 
               {:error, reason} ->
-                Logger.warning("Failed to create car for TeslaLogger car #{tl_car_id}: #{inspect(reason)}")
-                {:cont, {:ok, acc}}
+                msg =
+                  "Skipped TeslaLogger car #{tl_car_id} (#{tl_car["display_name"]}): #{inspect(reason)} — its data will NOT be imported"
+
+                Logger.warning(msg)
+                {:cont, {:ok, acc, [msg | skipped]}}
             end
           end)
 
         case car_mapping do
-          {:ok, mapping} ->
+          {:ok, mapping, skipped} ->
             state = %{state | car_mapping: mapping}
+            state = update_status(state, &Status.add_warnings(&1, skipped))
             {:ok, update_status(state, &Status.complete_step(&1, :cars))}
 
           {:error, msg} ->
@@ -437,7 +571,9 @@ defmodule TeslaMate.Import.TeslaLogger do
 
       {:error, reason} ->
         Logger.error("Failed to read cars: #{inspect(reason)}")
-        {:error, inspect(reason), update_status(state, &Status.fail_step(&1, :cars, inspect(reason)))}
+
+        {:error, inspect(reason),
+         update_status(state, &Status.fail_step(&1, :cars, inspect(reason)))}
     end
   end
 
@@ -450,10 +586,17 @@ defmodule TeslaMate.Import.TeslaLogger do
         Logger.info("Importing data for car #{car.id} (TeslaLogger ID: #{tl_car_id})")
         timezone = state.config[:timezone]
 
+        # Fresh per-car position lookup — a shared map would associate drives and
+        # charging processes with positions of another car that drove at the same time.
+        state = %{state | date_to_pos_id: %{}, pos_attrs_by_date: %{}}
+
         # Mode C: Pre-delete all overlapping data in FK-safe order BEFORE importing
         case maybe_pre_delete_overlapping(state, tl_car_id, car.id, timezone) do
           {:error, reason, state} ->
-            update_status(state, &Status.set_state(&1, {:error, "Pre-deletion failed: #{inspect(reason)}"}))
+            update_status(
+              state,
+              &Status.set_state(&1, {:error, "Pre-deletion failed: #{inspect(reason)}"})
+            )
 
           {:ok, state} ->
             state
@@ -462,9 +605,29 @@ defmodule TeslaMate.Import.TeslaLogger do
             |> import_charging_data(tl_car_id, car.id, timezone)
             |> import_states(tl_car_id, car.id, timezone)
             |> import_updates(tl_car_id, car.id, timezone)
+            |> then(&%{&1 | pos_attrs_by_date: %{}})
         end
       end
     end)
+  end
+
+  # Reads drive and charging session {start, end} ranges from TeslaLogger.
+  # Used both for Mode C pre-deletion and for filtering idle positions.
+  defp read_active_ranges(conn, tl_car_id, timezone) do
+    with {:ok, drive_rows} <- MysqlReader.read_drives(conn, tl_car_id),
+         {:ok, cp_rows} <- MysqlReader.read_charging_sessions(conn, tl_car_id) do
+      to_range = fn rows, map_fn ->
+        rows
+        |> Enum.map(fn r ->
+          m = map_fn.(r, timezone)
+          {m.start_date, m.end_date}
+        end)
+        |> Enum.reject(fn {s, _} -> is_nil(s) end)
+      end
+
+      {:ok, to_range.(drive_rows, &Mapper.map_drive/2),
+       to_range.(cp_rows, &Mapper.map_charging_process/2)}
+    end
   end
 
   defp maybe_pre_delete_overlapping(state, tl_car_id, car_id, timezone) do
@@ -474,52 +637,51 @@ defmodule TeslaMate.Import.TeslaLogger do
       Logger.info("Mode C: Pre-deleting overlapping TeslaMate data for car #{car_id}...")
       conn = state.mysql_conn
 
-      # Read TeslaLogger time ranges to compute what to delete
-      with {:ok, pos_rows} <- MysqlReader.read_positions(conn, tl_car_id),
-           {:ok, drive_rows} <- MysqlReader.read_drives(conn, tl_car_id),
-           {:ok, cp_rows} <- MysqlReader.read_charging_sessions(conn, tl_car_id),
+      with {:ok, drive_ranges, cp_ranges} <- read_active_ranges(conn, tl_car_id, timezone),
            {:ok, state_rows} <- MysqlReader.read_states(conn, tl_car_id) do
+        state_ranges =
+          state_rows
+          |> Enum.map(fn r ->
+            m = Mapper.map_state(r, timezone)
+            {m.start_date, m.end_date}
+          end)
+          |> Enum.reject(fn {s, _} -> is_nil(s) end)
 
-        # Compute overall time range from positions
-        pos_dates = Enum.map(pos_rows, fn row -> Mapper.map_position(row, timezone).date end)
-        pos_dates = Enum.reject(pos_dates, &is_nil/1)
+        # Each entity is deleted only where TL re-inserts the same kind of data.
+        # Positions are imported within drive/charge ranges (±buffer), so only
+        # those windows are cleared — TM data in TL gaps stays untouched.
+        pos_ranges =
+          (drive_ranges ++ cp_ranges)
+          |> Enum.map(fn {s, e} ->
+            {DateTime.add(s, -@active_range_buffer_seconds, :second),
+             e && DateTime.add(e, @active_range_buffer_seconds, :second)}
+          end)
 
-        pos_range =
-          if pos_dates != [] do
-            min_d = Enum.min(pos_dates, DateTime)
-            max_d = Enum.max(pos_dates, DateTime)
-            [{min_d, max_d}]
-          else
-            []
-          end
+        ranges_by_entity = %{
+          positions: Writer.consolidate_ranges(pos_ranges),
+          drives: Writer.consolidate_ranges(drive_ranges),
+          charging_processes: Writer.consolidate_ranges(cp_ranges),
+          states: Writer.consolidate_ranges(state_ranges),
+          # TL updates span from version-seen until next version, covering the whole
+          # logging period — use state coverage as the conservative delete window.
+          updates: Writer.consolidate_ranges(state_ranges)
+        }
 
-        # Compute ranges from drives, charging processes, states, updates
-        drive_ranges = drive_rows |> Enum.map(fn r -> m = Mapper.map_drive(r, timezone); {m.start_date, m.end_date} end) |> Enum.reject(fn {s, _} -> is_nil(s) end)
-        cp_ranges = cp_rows |> Enum.map(fn r -> m = Mapper.map_charging_process(r, timezone); {m.start_date, m.end_date} end) |> Enum.reject(fn {s, _} -> is_nil(s) end)
-        state_ranges = state_rows |> Enum.map(fn r -> m = Mapper.map_state(r, timezone); {m.start_date, m.end_date} end) |> Enum.reject(fn {s, _} -> is_nil(s) end)
-
-        # Note: updates are excluded from pre-deletion ranges because they have no end_date
-        # (end_date is computed post-import). Including them would create unbounded {start, nil}
-        # ranges that consolidate into infinite ranges and over-delete data.
-        all_ranges = pos_range ++ drive_ranges ++ cp_ranges ++ state_ranges
-        consolidated = Writer.consolidate_ranges(all_ranges)
-
-        if consolidated != [] do
-          Logger.info("Deleting overlapping TeslaMate data in #{length(consolidated)} time range(s)...")
-          deleted = Writer.delete_overlapping_data(car_id, consolidated)
-          Logger.info("Pre-deletion complete: #{inspect(deleted)}")
-        end
-
+        Writer.delete_overlapping_data(car_id, ranges_by_entity)
         {:ok, state}
       else
         {:error, reason} ->
-          Logger.error("Failed to compute TeslaLogger time ranges for pre-deletion: #{inspect(reason)}")
+          Logger.error(
+            "Failed to compute TeslaLogger time ranges for pre-deletion: #{inspect(reason)}"
+          )
+
           {:error, reason, state}
       end
     end
   end
 
   defp import_positions(%{status: %{state: {:error, _}}} = state, _, _, _), do: state
+
   defp import_positions(state, tl_car_id, car_id, timezone) do
     conn = state.mysql_conn
 
@@ -527,7 +689,6 @@ defmodule TeslaMate.Import.TeslaLogger do
          state = update_status(state, &Status.start_step(&1, :positions, total)),
          state = update_status(state, &Status.set_phase(&1, :positions, :reading)),
          {:ok, rows} <- MysqlReader.read_positions(conn, tl_car_id) do
-
       state = update_status(state, &Status.set_phase(&1, :positions, :mapping))
 
       {mapped, _count} =
@@ -536,7 +697,7 @@ defmodule TeslaMate.Import.TeslaLogger do
           new_count = count + 1
 
           if rem(new_count, 50_000) == 0 do
-            broadcast(update_status(state, &Status.update_step_progress(&1, :positions, new_count)).status)
+            update_status(state, &Status.update_step_progress(&1, :positions, new_count))
           end
 
           {result, new_count}
@@ -547,16 +708,15 @@ defmodule TeslaMate.Import.TeslaLogger do
         case MysqlReader.read_tpms(conn, tl_car_id) do
           {:ok, tpms_rows} when tpms_rows != [] ->
             Logger.info("Merging #{length(tpms_rows)} TPMS readings into positions")
-            Mapper.merge_tpms(mapped, tpms_rows)
+            Mapper.merge_tpms(mapped, tpms_rows, timezone)
 
           _ ->
             mapped
         end
 
-      # Filter positions to only keep those within drive or charging session time ranges.
-      # TeslaLogger logs positions continuously (parking, sleeping, etc.) which pollutes
-      # Grafana dashboards like the Speed Histogram. TeslaMate only needs positions that
-      # belong to drives or charging sessions.
+      # Keep only positions within drive or charging session time ranges.
+      # TeslaLogger logs positions continuously (parking, sleeping) which pollutes
+      # dashboards like the Speed Histogram with GPS jitter at 0 km/h.
       mapped = filter_positions_to_active_ranges(mapped, conn, tl_car_id, timezone)
 
       state = update_status(state, &Status.set_phase(&1, :positions, :validating))
@@ -565,17 +725,13 @@ defmodule TeslaMate.Import.TeslaLogger do
       warnings = Validator.format_warnings(errors)
       state = update_status(state, &Status.add_warnings(&1, warnings))
 
-      # Mode B: filter out positions that already exist in TeslaMate
+      # Mode B: drop positions in periods covered by existing TM drives/charges.
+      # TM and TL poll independently, so exact-timestamp dedup alone matches almost
+      # nothing — overlapping periods would end up with doubled GPS tracks.
       {valid, state} =
         if state.status.import_mode == :merge_tm_priority do
           state = update_status(state, &Status.set_phase(&1, :positions, :filtering))
-          existing_set = Writer.load_existing_position_dates(car_id)
-
-          filtered = Enum.reject(valid, fn pos ->
-            MapSet.member?(existing_set, DateTime.to_unix(pos.date, :second))
-          end)
-
-          {filtered, state}
+          {filter_positions_against_tm_ranges(valid, car_id), state}
         else
           {valid, state}
         end
@@ -583,13 +739,29 @@ defmodule TeslaMate.Import.TeslaLogger do
       state = update_status(state, &Status.set_phase(&1, :positions, :inserting))
 
       progress_fn = fn imported, _total ->
-        broadcast(update_status(state, &Status.update_step_progress(&1, :positions, imported)).status)
+        update_status(state, &Status.update_step_progress(&1, :positions, imported))
       end
 
       case Writer.insert_positions(car_id, valid, progress_fn) do
         {:ok, new_date_map} ->
-          state = %{state | date_to_pos_id: Map.merge(state.date_to_pos_id, new_date_map)}
-          update_status(state, &Status.complete_step(&1, :positions))
+          # Slim per-date attrs so drive enrichment can run from memory instead of
+          # re-querying every drive's positions from Postgres. Keyed by unix seconds —
+          # DateTimes returned from Postgres differ in microsecond precision from the
+          # mapped ones, so struct equality would never match.
+          pos_attrs_by_date =
+            Map.new(valid, fn p ->
+              {DateTime.to_unix(p.date, :second),
+               Map.take(p, [
+                 :odometer,
+                 :ideal_battery_range_km,
+                 :rated_battery_range_km,
+                 :inside_temp,
+                 :outside_temp
+               ])}
+            end)
+
+          state = %{state | date_to_pos_id: new_date_map, pos_attrs_by_date: pos_attrs_by_date}
+          update_status(state, &Status.complete_step(&1, :positions, map_size(new_date_map)))
 
         {:error, reason} ->
           Logger.error("Position insert failed: #{inspect(reason)}")
@@ -603,6 +775,7 @@ defmodule TeslaMate.Import.TeslaLogger do
   end
 
   defp import_drives(%{status: %{state: {:error, _}}} = state, _, _, _), do: state
+
   defp import_drives(state, tl_car_id, car_id, timezone) do
     conn = state.mysql_conn
 
@@ -610,7 +783,6 @@ defmodule TeslaMate.Import.TeslaLogger do
          state = update_status(state, &Status.start_step(&1, :drives, total)),
          state = update_status(state, &Status.set_phase(&1, :drives, :reading)),
          {:ok, rows} <- MysqlReader.read_drives(conn, tl_car_id) do
-
       state = update_status(state, &Status.set_phase(&1, :drives, :mapping))
 
       sorted_pos_array =
@@ -622,21 +794,20 @@ defmodule TeslaMate.Import.TeslaLogger do
         Enum.map_reduce(rows, 0, fn row, count ->
           drive_attrs = Mapper.map_drive(row, timezone)
 
-          # Enrich with position data
-          drive_positions =
-            find_positions_in_range(
-              sorted_pos_array,
-              drive_attrs.start_date,
-              drive_attrs.end_date
-            )
+          # Enrich with position data (from memory — one DB query per drive would
+          # make thousands of drives crawl)
+          pos_attrs =
+            sorted_pos_array
+            |> find_positions_in_range(drive_attrs.start_date, drive_attrs.end_date)
+            |> Enum.map(&Map.get(state.pos_attrs_by_date, DateTime.to_unix(&1, :second)))
+            |> Enum.reject(&is_nil/1)
 
-          pos_attrs = get_position_attrs_for_dates(drive_positions, state.date_to_pos_id)
           enriched = Mapper.enrich_drive(drive_attrs, pos_attrs)
 
           new_count = count + 1
 
           if rem(new_count, 500) == 0 do
-            broadcast(update_status(state, &Status.update_step_progress(&1, :drives, new_count)).status)
+            update_status(state, &Status.update_step_progress(&1, :drives, new_count))
           end
 
           {enriched, new_count}
@@ -655,13 +826,13 @@ defmodule TeslaMate.Import.TeslaLogger do
       state = update_status(state, &Status.set_phase(&1, :drives, :inserting))
 
       drive_progress = fn inserted, _total ->
-        broadcast(update_status(state, &Status.update_step_progress(&1, :drives, inserted)).status)
+        update_status(state, &Status.update_step_progress(&1, :drives, inserted))
       end
 
       case Writer.insert_drives(car_id, valid, drive_progress) do
         {:ok, drives_with_ids} ->
           Writer.associate_positions_with_drives(drives_with_ids, state.date_to_pos_id)
-          update_status(state, &Status.complete_step(&1, :drives))
+          update_status(state, &Status.complete_step(&1, :drives, length(drives_with_ids)))
 
         {:error, reason} ->
           Logger.error("Drive insert failed: #{inspect(reason)}")
@@ -675,6 +846,7 @@ defmodule TeslaMate.Import.TeslaLogger do
   end
 
   defp import_charging_data(%{status: %{state: {:error, _}}} = state, _, _, _), do: state
+
   defp import_charging_data(state, tl_car_id, car_id, timezone) do
     conn = state.mysql_conn
 
@@ -685,7 +857,6 @@ defmodule TeslaMate.Import.TeslaLogger do
          {:ok, cp_rows} <- MysqlReader.read_charging_sessions(conn, tl_car_id),
          {:ok, c_total} <- MysqlReader.count_charges(conn, tl_car_id),
          {:ok, c_rows} <- MysqlReader.read_charges(conn, tl_car_id) do
-
       state = update_status(state, &Status.set_phase(&1, :charging_processes, :mapping))
 
       # Map charges first (need them for enriching charging_processes)
@@ -768,23 +939,38 @@ defmodule TeslaMate.Import.TeslaLogger do
       state = update_status(state, &Status.set_phase(&1, :charging_processes, :inserting))
 
       cp_progress = fn inserted, _total ->
-        broadcast(update_status(state, &Status.update_step_progress(&1, :charging_processes, inserted)).status)
+        update_status(state, &Status.update_step_progress(&1, :charging_processes, inserted))
       end
 
       {tl_cs_id_to_cp_id, state} =
-        case Writer.insert_charging_processes(car_id, valid_cps_with_tl_ids, state.date_to_pos_id, cp_progress) do
+        case Writer.insert_charging_processes(
+               car_id,
+               valid_cps_with_tl_ids,
+               state.date_to_pos_id,
+               cp_progress
+             ) do
           {:ok, mapping} ->
-            {mapping, update_status(state, &Status.complete_step(&1, :charging_processes))}
+            {mapping,
+             update_status(
+               state,
+               &Status.complete_step(&1, :charging_processes, map_size(mapping))
+             )}
 
           {:error, reason} ->
             Logger.error("Charging process insert failed: #{inspect(reason)}")
-            {%{}, update_status(state, &Status.fail_step(&1, :charging_processes, inspect(reason)))}
+
+            {%{},
+             update_status(state, &Status.fail_step(&1, :charging_processes, inspect(reason)))}
         end
 
       # Now import charges (skip if CP insert failed)
       if tl_cs_id_to_cp_id == %{} and valid_cps_with_tl_ids != [] do
         Logger.warning("Skipping charge import because charging process insert failed")
-        update_status(state, &Status.fail_step(&1, :charges, "Skipped: charging process insert failed"))
+
+        update_status(
+          state,
+          &Status.fail_step(&1, :charges, "Skipped: charging process insert failed")
+        )
       else
         state = update_status(state, &Status.start_step(&1, :charges, c_total))
         state = update_status(state, &Status.set_phase(&1, :charges, :validating))
@@ -796,12 +982,12 @@ defmodule TeslaMate.Import.TeslaLogger do
         state = update_status(state, &Status.set_phase(&1, :charges, :inserting))
 
         charge_progress = fn imported, _total ->
-          broadcast(update_status(state, &Status.update_step_progress(&1, :charges, imported)).status)
+          update_status(state, &Status.update_step_progress(&1, :charges, imported))
         end
 
         case Writer.insert_charges(valid_charges, tl_cs_id_to_cp_id, charge_progress) do
-          {:ok, _count} ->
-            update_status(state, &Status.complete_step(&1, :charges))
+          {:ok, count} ->
+            update_status(state, &Status.complete_step(&1, :charges, count))
 
           {:error, reason} ->
             Logger.error("Charge insert failed: #{inspect(reason)}")
@@ -811,6 +997,7 @@ defmodule TeslaMate.Import.TeslaLogger do
     else
       {:error, reason} ->
         Logger.error("Failed to import charging data: #{inspect(reason)}")
+
         state
         |> update_status(&Status.fail_step(&1, :charging_processes, inspect(reason)))
         |> update_status(&Status.fail_step(&1, :charges, inspect(reason)))
@@ -855,20 +1042,20 @@ defmodule TeslaMate.Import.TeslaLogger do
          state = update_status(state, &Status.start_step(&1, step, total)),
          state = update_status(state, &Status.set_phase(&1, step, :reading)),
          {:ok, rows} <- opts.read_fn.(conn) do
-
       state = update_status(state, &Status.set_phase(&1, step, :mapping))
       valid = rows |> opts.map_fn.() |> opts.filter_fn.()
 
-      {valid, state} = maybe_filter_overlapping(state, step, opts.merge_entity, opts.car_id, valid)
+      {valid, state} =
+        maybe_filter_overlapping(state, step, opts.merge_entity, opts.car_id, valid)
 
       state = update_status(state, &Status.set_phase(&1, step, :inserting))
 
       progress_fn = fn inserted, _total ->
-        broadcast(update_status(state, &Status.update_step_progress(&1, step, inserted)).status)
+        update_status(state, &Status.update_step_progress(&1, step, inserted))
       end
 
       case opts.insert_fn.(valid, progress_fn) do
-        {:ok, _count} -> update_status(state, &Status.complete_step(&1, step))
+        {:ok, count} -> update_status(state, &Status.complete_step(&1, step, count))
         {:error, reason} -> update_status(state, &Status.fail_step(&1, step, inspect(reason)))
       end
     else
@@ -924,92 +1111,100 @@ defmodule TeslaMate.Import.TeslaLogger do
       end)
 
     if dropped != [] do
-      Logger.info("Filtered #{length(dropped)} phantom charging sessions (TL charge_energy_added nil or ~0)")
+      Logger.info(
+        "Filtered #{length(dropped)} phantom charging sessions (TL charge_energy_added nil or ~0)"
+      )
     end
 
     kept
   end
 
-  # Filters positions to only keep those within drive or charging session time ranges.
-  # TeslaLogger logs positions continuously (every few seconds/minutes), even while
-  # parked or sleeping. These idle positions pollute dashboards (e.g. Speed Histogram
-  # shows 96% at 0-10 km/h from GPS jitter). We read drive and charging session time
-  # ranges from TL MySQL and only keep positions that fall within those ranges.
-  # A small buffer (60s) is added around each range to ensure boundary positions
-  # (needed for start/end_position_id on drives and position_id on charging_processes)
-  # are not lost.
+  # Keeps only positions within drive or charging session time ranges (±buffer).
+  # TeslaLogger logs positions continuously, even while parked or sleeping; these
+  # idle positions pollute dashboards (e.g. Speed Histogram shows 96% at 0-10 km/h
+  # from GPS jitter).
   defp filter_positions_to_active_ranges(positions, conn, tl_car_id, timezone) do
-    buffer_seconds = 60
+    case read_active_ranges(conn, tl_car_id, timezone) do
+      {:ok, [], []} ->
+        Logger.warning("No drives or charging sessions found — keeping all positions")
+        positions
 
-    # Read drive time ranges
-    drive_ranges =
-      case MysqlReader.read_drives(conn, tl_car_id) do
-        {:ok, rows} ->
-          rows
-          |> Enum.map(fn r ->
-            m = Mapper.map_drive(r, timezone)
-            {m.start_date, m.end_date}
+      {:ok, drive_ranges, charge_ranges} ->
+        unix_ranges = to_consolidated_unix_ranges(drive_ranges ++ charge_ranges)
+        before = length(positions)
+
+        filtered =
+          Enum.filter(positions, fn pos ->
+            case pos.date do
+              nil -> false
+              date -> unix_in_ranges?(DateTime.to_unix(date, :second), unix_ranges)
+            end
           end)
-          |> Enum.reject(fn {s, _} -> is_nil(s) end)
 
-        _ ->
-          []
-      end
+        dropped = before - length(filtered)
 
-    # Read charging session time ranges
-    charge_ranges =
-      case MysqlReader.read_charging_sessions(conn, tl_car_id) do
-        {:ok, rows} ->
-          rows
-          |> Enum.map(fn r ->
-            m = Mapper.map_charging_process(r, timezone)
-            {m.start_date, m.end_date}
-          end)
-          |> Enum.reject(fn {s, _} -> is_nil(s) end)
+        if dropped > 0 do
+          Logger.info(
+            "Filtered #{dropped} idle positions (kept #{length(filtered)} of #{before} " <>
+              "within #{length(drive_ranges)} drives + #{length(charge_ranges)} charging sessions)"
+          )
+        end
 
-        _ ->
-          []
-      end
+        filtered
 
-    all_ranges = drive_ranges ++ charge_ranges
-
-    if all_ranges == [] do
-      Logger.warning("No drives or charging sessions found — keeping all positions")
-      positions
-    else
-      # Convert ranges to unix seconds with buffer, then consolidate overlapping ranges
-      unix_ranges =
-        all_ranges
-        |> Enum.map(fn {start_date, end_date} ->
-          s = DateTime.to_unix(start_date, :second) - buffer_seconds
-          e = if end_date, do: DateTime.to_unix(end_date, :second) + buffer_seconds, else: s + 86_400
-          {s, e}
-        end)
-        |> Enum.sort()
-        |> consolidate_unix_ranges()
-        |> List.to_tuple()
-
-      before = length(positions)
-
-      filtered =
-        Enum.filter(positions, fn pos ->
-          case pos.date do
-            nil -> false
-            date -> unix_in_ranges?(DateTime.to_unix(date, :second), unix_ranges)
-          end
-        end)
-
-      dropped = before - length(filtered)
-
-      if dropped > 0 do
-        Logger.info(
-          "Filtered #{dropped} idle positions (kept #{length(filtered)} of #{before} " <>
-            "within #{length(drive_ranges)} drives + #{length(charge_ranges)} charging sessions)"
+      {:error, reason} ->
+        Logger.warning(
+          "Could not read active ranges (#{inspect(reason)}) — keeping all positions"
         )
-      end
 
-      filtered
+        positions
     end
+  end
+
+  # Mode B: rejects positions that fall within existing TeslaMate drive/charge
+  # ranges or match an existing position timestamp exactly.
+  defp filter_positions_against_tm_ranges(positions, car_id) do
+    tm_ranges =
+      (Writer.load_existing_ranges(car_id, :drives) ++
+         Writer.load_existing_ranges(car_id, :charging_processes))
+      |> Enum.reject(fn {s, _} -> is_nil(s) end)
+      |> to_consolidated_unix_ranges()
+
+    existing_set = Writer.load_existing_position_dates(car_id)
+    before = length(positions)
+
+    kept =
+      Enum.reject(positions, fn pos ->
+        unix = DateTime.to_unix(pos.date, :second)
+        MapSet.member?(existing_set, unix) or unix_in_ranges?(unix, tm_ranges)
+      end)
+
+    dropped = before - length(kept)
+
+    if dropped > 0 do
+      Logger.info("Mode B: skipped #{dropped} positions overlapping existing TeslaMate data")
+    end
+
+    kept
+  end
+
+  # Converts {DateTime, DateTime | nil} ranges into a sorted, consolidated tuple of
+  # buffered unix ranges for binary search. Open-ended ranges are capped at 24h.
+  defp to_consolidated_unix_ranges(ranges) do
+    ranges
+    |> Enum.map(fn {start_date, end_date} ->
+      s = DateTime.to_unix(start_date, :second) - @active_range_buffer_seconds
+
+      e =
+        if end_date,
+          do: DateTime.to_unix(end_date, :second) + @active_range_buffer_seconds,
+          else: s + 86_400
+
+      {s, e}
+    end)
+    |> Enum.sort()
+    |> consolidate_unix_ranges()
+    |> List.to_tuple()
   end
 
   # Consolidates sorted {start, end} unix ranges by merging overlapping/adjacent ranges.
@@ -1084,7 +1279,7 @@ defmodule TeslaMate.Import.TeslaLogger do
   defp recalculate_car_efficiencies(state) do
     Enum.each(state.car_mapping, fn {_tl_id, car} ->
       query =
-        from cp in TeslaMate.Log.ChargingProcess,
+        from cp in ChargingProcess,
           select: {
             fragment(
               "round(? / nullif(? - ?, 0), 4)",
@@ -1107,11 +1302,13 @@ defmodule TeslaMate.Import.TeslaLogger do
           factor_float = Decimal.to_float(factor)
 
           if factor_float > 0 do
-            Logger.info("Car #{car.id}: derived efficiency #{Float.round(factor_float * 1000, 1)} Wh/km (#{n}x confirmed)")
+            Logger.info(
+              "Car #{car.id}: derived efficiency #{Float.round(factor_float * 1000, 1)} Wh/km (#{n}x confirmed)"
+            )
 
-            TeslaMate.Log.Car
+            Car
             |> Repo.get!(car.id)
-            |> TeslaMate.Log.Car.changeset(%{efficiency: factor_float})
+            |> Car.changeset(%{efficiency: factor_float})
             |> Repo.update!()
           end
 
@@ -1121,15 +1318,14 @@ defmodule TeslaMate.Import.TeslaLogger do
     end)
   end
 
-  defp count_geocoding_lookups do
-    # Each drive without start/end address needs 1 Nominatim lookup per missing address.
-    # Each charging process without address needs 1 lookup.
-    # Nominatim is always called (even for DB-cached addresses), so every lookup = 1 API call.
+  # Counts pending Nominatim lookups for the imported cars (1 per missing address).
+  defp count_geocoding_lookups(car_ids) do
     drive_lookups =
       Repo.one(
-        from(d in TeslaMate.Log.Drive,
+        from(d in Drive,
           where:
-            (is_nil(d.start_address_id) or is_nil(d.end_address_id)) and
+            d.car_id in ^car_ids and
+              (is_nil(d.start_address_id) or is_nil(d.end_address_id)) and
               not is_nil(d.start_position_id) and not is_nil(d.end_position_id),
           select:
             fragment(
@@ -1142,8 +1338,8 @@ defmodule TeslaMate.Import.TeslaLogger do
 
     charge_lookups =
       Repo.aggregate(
-        from(c in TeslaMate.Log.ChargingProcess,
-          where: is_nil(c.address_id) and not is_nil(c.position_id)
+        from(c in ChargingProcess,
+          where: c.car_id in ^car_ids and is_nil(c.address_id) and not is_nil(c.position_id)
         ),
         :count
       ) || 0
@@ -1152,17 +1348,21 @@ defmodule TeslaMate.Import.TeslaLogger do
   end
 
   defp finalize(state) do
+    car_ids = Enum.map(state.car_mapping, fn {_tl_id, car} -> car.id end)
+
     # Count geocoding lookups needed before triggering repair
-    geocoding_lookups = count_geocoding_lookups()
+    geocoding_lookups = count_geocoding_lookups(car_ids)
     Logger.info("Geocoding: #{geocoding_lookups} reverse lookups needed")
     state = update_status(state, &Status.set_geocoding_lookups(&1, geocoding_lookups))
 
     # Trigger geocoding
     state = update_status(state, &Status.start_step(&1, :geocoding))
+
     case Repair.trigger_run() do
       :ok -> :ok
       error -> Logger.warning("Repair.trigger_run returned: #{inspect(error)}")
     end
+
     state = update_status(state, &Status.complete_step(&1, :geocoding))
 
     # Run post-import validation
@@ -1178,10 +1378,61 @@ defmodule TeslaMate.Import.TeslaLogger do
     # Recalculate car efficiency from imported charging data
     recalculate_car_efficiencies(state)
 
+    write_import_metadata(state)
+
     # Complete
     state = update_status(state, &Status.set_state(&1, :complete))
     Logger.info("TeslaLogger import complete!")
     state
+  end
+
+  # Records one import_metadata row per car so a later run (or support request)
+  # can tell when and from where data was imported.
+  defp write_import_metadata(state) do
+    imported_at = DateTime.utc_now()
+
+    config = %{
+      "host" => state.config[:host],
+      "port" => state.config[:port],
+      "database" => state.config[:database],
+      "timezone" => state.config[:timezone],
+      "import_mode" => to_string(state.status.import_mode)
+    }
+
+    Enum.each(state.car_mapping, fn {tl_car_id, car} ->
+      attrs = %{
+        source: "teslalogger",
+        imported_at: imported_at,
+        car_id: car.id,
+        source_car_id: tl_car_id,
+        positions_count: Repo.aggregate(from(p in Position, where: p.car_id == ^car.id), :count),
+        drives_count: Repo.aggregate(from(d in Drive, where: d.car_id == ^car.id), :count),
+        charging_processes_count:
+          Repo.aggregate(from(cp in ChargingProcess, where: cp.car_id == ^car.id), :count),
+        charges_count:
+          Repo.aggregate(
+            from(c in TeslaMate.Log.Charge,
+              join: cp in assoc(c, :charging_process),
+              where: cp.car_id == ^car.id
+            ),
+            :count
+          ),
+        states_count:
+          Repo.aggregate(from(s in TeslaMate.Log.State, where: s.car_id == ^car.id), :count),
+        updates_count:
+          Repo.aggregate(from(u in TeslaMate.Log.Update, where: u.car_id == ^car.id), :count),
+        warnings_count: length(state.status.warnings),
+        config: config
+      }
+
+      case %ImportMetadata{} |> ImportMetadata.changeset(attrs) |> Repo.insert() do
+        {:ok, _} ->
+          :ok
+
+        {:error, changeset} ->
+          Logger.warning("Failed to write import metadata: #{inspect(changeset.errors)}")
+      end
+    end)
   end
 
   defp run_post_import_validation(state) do
@@ -1189,12 +1440,18 @@ defmodule TeslaMate.Import.TeslaLogger do
       # Count positions without drive_id
       orphan_positions =
         Repo.aggregate(
-          from(p in TeslaMate.Log.Position, where: p.car_id == ^car.id and is_nil(p.drive_id)),
+          from(p in Position, where: p.car_id == ^car.id and is_nil(p.drive_id)),
           :count
         )
 
       if orphan_positions > 0 do
-        update_status(state, &Status.add_warning(&1, "Car #{car.id}: #{orphan_positions} positions without drive assignment"))
+        update_status(
+          state,
+          &Status.add_warning(
+            &1,
+            "Car #{car.id}: #{orphan_positions} positions without drive assignment"
+          )
+        )
       else
         state
       end
@@ -1267,32 +1524,6 @@ defmodule TeslaMate.Import.TeslaLogger do
   end
 
   ## Helpers
-
-  defp get_position_attrs_for_dates(dates, date_to_pos_id) do
-    pos_ids =
-      dates
-      |> Enum.map(&Map.get(date_to_pos_id, &1))
-      |> Enum.reject(&is_nil/1)
-
-    case pos_ids do
-      [] ->
-        []
-
-      ids ->
-        from(p in TeslaMate.Log.Position,
-          where: p.id in ^ids,
-          order_by: p.date,
-          select: %{
-            odometer: p.odometer,
-            ideal_battery_range_km: p.ideal_battery_range_km,
-            rated_battery_range_km: p.rated_battery_range_km,
-            inside_temp: p.inside_temp,
-            outside_temp: p.outside_temp
-          }
-        )
-        |> Repo.all()
-    end
-  end
 
   defp find_positions_in_range(_sorted_pos_array, nil, _end_date), do: []
 

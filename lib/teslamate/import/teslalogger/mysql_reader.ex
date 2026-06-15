@@ -165,6 +165,38 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     count_query(conn, "SELECT COUNT(*) FROM drivestate WHERE CarID = ?", [car_id])
   end
 
+  @doc "Reads the N most recent drives for a car, newest first. Same columns as read_drives."
+  def read_recent_drives(conn, car_id, limit) do
+    query = """
+    SELECT id, StartDate, EndDate, StartPos, EndPos,
+           outside_temp_avg, speed_max, power_max, power_min
+    FROM drivestate
+    WHERE CarID = ?
+    ORDER BY StartDate DESC
+    LIMIT #{limit}
+    """
+
+    fetch_all(conn, query, [car_id])
+  end
+
+  @doc "Reads full position rows for the given pos IDs, ordered by timestamp."
+  def read_positions_by_ids(_conn, []), do: {:ok, []}
+
+  def read_positions_by_ids(conn, ids) do
+    placeholders = ids |> Enum.map(fn _ -> "?" end) |> Enum.join(", ")
+
+    query = """
+    SELECT id, Datum, lat, lng, speed, power, odometer, altitude,
+           battery_level, inside_temp, outside_temp,
+           battery_heater, battery_range_km, ideal_battery_range_km
+    FROM pos
+    WHERE id IN (#{placeholders})
+    ORDER BY Datum ASC
+    """
+
+    fetch_all(conn, query, ids)
+  end
+
   @doc "Reads charge data points for a given car, ordered by timestamp."
   def read_charges(conn, car_id) do
     # Use a correlated subquery to guarantee at most one chargingstate match per
@@ -223,6 +255,44 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     count_query(conn, "SELECT COUNT(*) FROM chargingstate WHERE CarID = ?", [car_id])
   end
 
+  @doc "Reads the N most recent charging sessions, newest first. Same columns as read_charging_sessions."
+  def read_recent_charging_sessions(conn, car_id, limit) do
+    query = """
+    SELECT id, StartDate, EndDate, charge_energy_added, cost_total,
+           cost_per_kwh, cost_per_session, cost_per_minute,
+           fast_charger_brand, fast_charger_type,
+           conn_charge_cable, max_charger_power,
+           cost_kwh_meter_invoice
+    FROM chargingstate
+    WHERE CarID = ?
+    ORDER BY StartDate DESC
+    LIMIT #{limit}
+    """
+
+    fetch_all(conn, query, [car_id])
+  end
+
+  @doc """
+  Reads charge rows for one known session within its local-time range.
+  Start/end are the raw StartDate/EndDate from chargingstate (local time).
+  """
+  def read_charges_in_range(conn, car_id, start_naive, end_naive) do
+    query = """
+    SELECT c.id, c.Datum, c.battery_level,
+           c.charge_energy_added,
+           c.charger_power, c.ideal_battery_range_km,
+           c.battery_range_km,
+           c.charger_voltage,
+           c.charger_phases, c.charger_actual_current, c.outside_temp,
+           c.charger_pilot_current, c.battery_heater
+    FROM charging c
+    WHERE c.CarID = ? AND c.Datum BETWEEN ? AND ?
+    ORDER BY c.Datum ASC
+    """
+
+    fetch_all(conn, query, [car_id, start_naive, end_naive])
+  end
+
   @doc "Reads vehicle states for a given car."
   def read_states(conn, car_id) do
     query = """
@@ -275,22 +345,6 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
       {:ok, _} = result -> result
       {:error, %MyXQL.Error{mysql: %{code: 1146}}} -> {:ok, []}
       {:error, _} = err -> err
-    end
-  end
-
-  @doc "Reads the position row for a given TeslaLogger pos ID."
-  def read_position_by_id(conn, pos_id) do
-    query = "SELECT lat, lng, Datum FROM pos WHERE id = ? LIMIT 1"
-
-    case MyXQL.query(conn, query, [pos_id]) do
-      {:ok, %MyXQL.Result{rows: [row], columns: columns}} ->
-        {:ok, row_to_map(columns, row)}
-
-      {:ok, %MyXQL.Result{rows: []}} ->
-        {:ok, nil}
-
-      {:error, _} = err ->
-        err
     end
   end
 

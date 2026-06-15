@@ -11,17 +11,21 @@ sidebar_label: TeslaLogger
 
 ## Configuration
 
-Set the following environment variables for TeslaMate:
+The import is configured through a guided setup in the web UI at `/import/teslalogger` —
+no environment variables are required. Connection details are entered in the first
+wizard step and tested before anything else happens.
 
-| Variable                        | Default          | Description                          |
-| ------------------------------- | ---------------- | ------------------------------------ |
-| `TESLALOGGER_IMPORT`            | `false`          | Set to `true` to enable import mode  |
-| `TESLALOGGER_MYSQL_HOST`        | `localhost`      | TeslaLogger MySQL hostname           |
-| `TESLALOGGER_MYSQL_PORT`        | `3306`           | TeslaLogger MySQL port               |
-| `TESLALOGGER_MYSQL_USER`        | `root`           | TeslaLogger MySQL username           |
-| `TESLALOGGER_MYSQL_PASSWORD`    | `teslalogger`    | TeslaLogger MySQL password           |
-| `TESLALOGGER_MYSQL_DATABASE`    | `teslalogger`    | TeslaLogger MySQL database name      |
-| `TESLALOGGER_TIMEZONE`          | `Europe/Berlin`  | Timezone TeslaLogger was running in  |
+Optionally, the following environment variables pre-fill the connection form
+(useful for docker-compose setups):
+
+| Variable                        | Description                          |
+| ------------------------------- | ------------------------------------ |
+| `TESLALOGGER_MYSQL_HOST`        | TeslaLogger MySQL hostname           |
+| `TESLALOGGER_MYSQL_PORT`        | TeslaLogger MySQL port               |
+| `TESLALOGGER_MYSQL_USER`        | TeslaLogger MySQL username           |
+| `TESLALOGGER_MYSQL_PASSWORD`    | TeslaLogger MySQL password           |
+| `TESLALOGGER_MYSQL_DATABASE`    | TeslaLogger MySQL database name      |
+| `TESLALOGGER_TIMEZONE`          | Timezone TeslaLogger was running in  |
 
 ## Docker Compose Example
 
@@ -36,7 +40,6 @@ services:
       - DATABASE_HOST=database
       - MQTT_HOST=mosquitto
       - ENCRYPTION_KEY=your_encryption_key
-      - TESLALOGGER_IMPORT=true
       - TESLALOGGER_MYSQL_HOST=teslalogger-db
       - TESLALOGGER_MYSQL_PORT=3306
       - TESLALOGGER_MYSQL_USER=root
@@ -65,22 +68,24 @@ services:
 
 ## Usage
 
-1. Start TeslaMate with the TeslaLogger import environment variables set
-2. Open the TeslaMate web UI at `http://localhost:4000/import/teslalogger`
-3. Optionally enter your car's VIN, EID, and VID (if TeslaLogger doesn't store them)
-4. Click **Start Import**
-5. Monitor the progress for each import step:
-   - Cars
-   - Positions
-   - Drives
-   - Charges
-   - Charging Sessions
-   - States
-   - Updates
-   - Geocoding
-   - Validation
-6. Review any validation warnings
-7. After the import is complete, remove the `TESLALOGGER_IMPORT=true` variable and restart TeslaMate in normal mode
+Open the TeslaMate web UI at `http://localhost:4000/import/teslalogger` and follow
+the guided setup:
+
+1. **Connection** — enter host, port, username, password, database, and the timezone
+   your TeslaLogger was running in, then click **Test Connection**
+2. **Checks** — five preflight checks run automatically: MySQL connection, timezone
+   validation, schema check, source data summary, and a TeslaMate data check.
+   The wizard only continues when all checks pass.
+3. **Vehicles** — review the cars found in TeslaLogger (including drive/charge counts
+   and date range) and optionally enter VIN, EID, and VID manually
+4. **Preview** — a sample of your most recent drives and charging sessions is loaded
+   and mapped exactly as the import would store it (local → UTC times, distances, SOC,
+   energy, costs), including the TeslaLogger → TeslaMate car mapping. Rows the import
+   would filter (phantom drives, ~0 kWh sessions) are flagged here, before anything
+   is written.
+5. **Mode** — choose the import mode (clean, merge with TeslaMate priority, or merge
+   with TeslaLogger priority)
+6. **Import** — monitor the per-step progress and review validation warnings
 
 ## What Gets Imported
 
@@ -109,13 +114,12 @@ Warnings are displayed in the UI but do not block the import. Invalid records wi
 
 ## Timezone Handling
 
-TeslaLogger stores timestamps in local time (MySQL `datetime` without timezone info). You must specify the timezone your TeslaLogger instance was running in via `TESLALOGGER_TIMEZONE`. All timestamps are converted to UTC during import.
+TeslaLogger stores timestamps in local time (MySQL `datetime` without timezone info). You must specify the timezone your TeslaLogger instance was running in (wizard step 1). All timestamps are converted to UTC during import. The preview step shows both the local and the converted UTC time so you can verify the conversion before importing.
 
 ## After Import
 
 - **Geocoding**: Address lookup for drive start/end positions happens automatically in the background after import. This uses OpenStreetMap Nominatim with rate limiting (1 request/second), so it may take a while for many drives.
 - **Grafana**: Check your Grafana dashboards (Trips, Charges, Statistics) to verify the imported data.
-- **Normal mode**: Remove the `TESLALOGGER_IMPORT` variable and restart TeslaMate to return to normal operation.
 
 ## Troubleshooting
 

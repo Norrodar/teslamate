@@ -27,21 +27,43 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
         Enum.map(batch, fn pos ->
           pos
           |> Map.take([
-            :car_id, :date, :latitude, :longitude, :elevation, :speed, :power,
-            :odometer, :ideal_battery_range_km, :est_battery_range_km,
-            :rated_battery_range_km, :battery_level, :usable_battery_level,
-            :battery_heater, :battery_heater_on, :battery_heater_no_power,
-            :outside_temp, :inside_temp, :fan_status, :driver_temp_setting,
-            :passenger_temp_setting, :is_climate_on, :is_rear_defroster_on,
+            :car_id,
+            :date,
+            :latitude,
+            :longitude,
+            :elevation,
+            :speed,
+            :power,
+            :odometer,
+            :ideal_battery_range_km,
+            :est_battery_range_km,
+            :rated_battery_range_km,
+            :battery_level,
+            :usable_battery_level,
+            :battery_heater,
+            :battery_heater_on,
+            :battery_heater_no_power,
+            :outside_temp,
+            :inside_temp,
+            :fan_status,
+            :driver_temp_setting,
+            :passenger_temp_setting,
+            :is_climate_on,
+            :is_rear_defroster_on,
             :is_front_defroster_on,
-            :tpms_pressure_fl, :tpms_pressure_fr,
-            :tpms_pressure_rl, :tpms_pressure_rr
+            :tpms_pressure_fl,
+            :tpms_pressure_fr,
+            :tpms_pressure_rl,
+            :tpms_pressure_rr
           ])
         end)
 
-      case Repo.transaction(fn ->
-        Repo.insert_all(Position, entries, returning: [:id, :date])
-      end, timeout: @transaction_timeout) do
+      case Repo.transaction(
+             fn ->
+               Repo.insert_all(Position, entries, returning: [:id, :date])
+             end,
+             timeout: @transaction_timeout
+           ) do
         {:ok, {count, results}} ->
           new_inserted = inserted + count
           progress_fn.(new_inserted, total)
@@ -54,12 +76,17 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
           {:cont, {new_inserted, new_date_map}}
 
         {:error, reason} ->
-          Logger.error("Failed to insert position batch at offset #{inserted}: #{inspect(reason)}")
+          Logger.error(
+            "Failed to insert position batch at offset #{inserted}: #{inspect(reason)}"
+          )
+
           {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:error, reason} -> {:error, reason}
+      {:error, reason} ->
+        {:error, reason}
+
       {_count, date_map} ->
         {:ok, date_map}
     end
@@ -71,46 +98,71 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
   def insert_drives(car_id, drives, progress_fn \\ fn _, _ -> :ok end) do
     total = length(drives)
 
-    Repo.transaction(fn ->
-      {result, _count} =
-        Enum.map_reduce(drives, 0, fn drive_attrs, count ->
-          entry =
-            drive_attrs
+    Repo.transaction(
+      fn ->
+        {result, _count} =
+          Enum.map_reduce(drives, 0, fn drive_attrs, count ->
+            entry =
+              drive_attrs
+              |> Map.put(:car_id, car_id)
+              |> Map.take([
+                :car_id,
+                :start_date,
+                :end_date,
+                :outside_temp_avg,
+                :inside_temp_avg,
+                :speed_max,
+                :power_max,
+                :power_min,
+                :start_ideal_range_km,
+                :end_ideal_range_km,
+                :start_rated_range_km,
+                :end_rated_range_km,
+                :start_km,
+                :end_km,
+                :distance,
+                :duration_min,
+                :start_position_id,
+                :end_position_id
+              ])
 
-            |> Map.put(:car_id, car_id)
-            |> Map.take([
-              :car_id, :start_date, :end_date, :outside_temp_avg, :inside_temp_avg,
-              :speed_max, :power_max, :power_min, :start_ideal_range_km, :end_ideal_range_km,
-              :start_rated_range_km, :end_rated_range_km, :start_km, :end_km,
-              :distance, :duration_min, :start_position_id, :end_position_id
-            ])
+            item =
+              case %Drive{car_id: car_id} |> Drive.changeset(entry) |> Repo.insert() do
+                {:ok, drive} ->
+                  {drive.id, drive_attrs.start_date, drive_attrs.end_date}
 
-          item =
-            case %Drive{car_id: car_id} |> Drive.changeset(entry) |> Repo.insert() do
-              {:ok, drive} ->
-                {drive.id, drive_attrs.start_date, drive_attrs.end_date}
+                {:error, changeset} ->
+                  Logger.warning(
+                    "Skipping drive at #{drive_attrs.start_date}: #{inspect(changeset.errors)}"
+                  )
 
-              {:error, changeset} ->
-                Logger.warning("Skipping drive at #{drive_attrs.start_date}: #{inspect(changeset.errors)}")
-                nil
-            end
+                  nil
+              end
 
-          new_count = count + 1
+            new_count = count + 1
 
-          if rem(new_count, @progress_interval) == 0, do: progress_fn.(new_count, total)
-          {item, new_count}
-        end)
+            if rem(new_count, @progress_interval) == 0, do: progress_fn.(new_count, total)
+            {item, new_count}
+          end)
 
-      Enum.reject(result, &is_nil/1)
-    end, timeout: @transaction_timeout)
+        Enum.reject(result, &is_nil/1)
+      end,
+      timeout: @transaction_timeout
+    )
   end
 
   @doc """
   Associates positions with drives by updating drive_id based on date ranges.
   Uses pre-sorted date list for efficient range lookup.
   """
-  def associate_positions_with_drives(drives_with_ids, date_to_pos_id, progress_fn \\ fn _, _ -> :ok end) do
-    sorted_array = build_sorted_array(date_to_pos_id, fn {dt, _id} -> dt end, fn {_dt, id} -> id end)
+  def associate_positions_with_drives(
+        drives_with_ids,
+        date_to_pos_id,
+        progress_fn \\ fn _, _ -> :ok end
+      ) do
+    sorted_array =
+      build_sorted_array(date_to_pos_id, fn {dt, _id} -> dt end, fn {_dt, id} -> id end)
+
     total = length(drives_with_ids)
 
     drives_with_ids
@@ -128,9 +180,7 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
         last_pos_id = List.last(pos_ids)
 
         from(d in Drive, where: d.id == ^drive_id)
-        |> Repo.update_all(
-          set: [start_position_id: first_pos_id, end_position_id: last_pos_id]
-        )
+        |> Repo.update_all(set: [start_position_id: first_pos_id, end_position_id: last_pos_id])
       end
 
       if rem(idx, @progress_interval) == 0 do
@@ -145,56 +195,89 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
   Inserts charging processes within a transaction.
   Returns {:ok, [{tl_id, tm_id}]} for charge association.
   """
-  def insert_charging_processes(car_id, processes_with_tl_ids, date_to_pos_id, progress_fn \\ fn _, _ -> :ok end) do
+  def insert_charging_processes(
+        car_id,
+        processes_with_tl_ids,
+        date_to_pos_id,
+        progress_fn \\ fn _, _ -> :ok end
+      ) do
     total = length(processes_with_tl_ids)
 
-    pos_sorted_array = build_sorted_array(date_to_pos_id, fn {dt, _} -> dt end, fn {_, id} -> id end)
+    pos_sorted_array =
+      build_sorted_array(date_to_pos_id, fn {dt, _} -> dt end, fn {_, id} -> id end)
 
-    Repo.transaction(fn ->
-      {result, _count} =
-        Enum.map_reduce(processes_with_tl_ids, 0, fn {tl_id, cp_attrs}, count ->
-          position_id =
-            if cp_attrs.start_date do
-              find_nearest(pos_sorted_array, DateTime.to_unix(cp_attrs.start_date, :second))
-            end
+    Repo.transaction(
+      fn ->
+        {result, _count} =
+          Enum.map_reduce(processes_with_tl_ids, 0, fn {tl_id, cp_attrs}, count ->
+            # Positions for charging sessions are imported with a ±60s buffer, so a
+            # match within 15 minutes is generous; anything further would attach the
+            # wrong address/geofence. position_id is NOT NULL, so sessions without a
+            # nearby position must be skipped instead of inserted.
+            position_id =
+              if cp_attrs.start_date do
+                find_nearest(
+                  pos_sorted_array,
+                  DateTime.to_unix(cp_attrs.start_date, :second),
+                  900
+                )
+              end
 
+            item =
+              if is_nil(position_id) do
+                Logger.warning(
+                  "Skipping charging process at #{cp_attrs.start_date}: no position within 15 minutes"
+                )
 
-          if is_nil(position_id) do
-            Logger.warning("No nearby position for charging process at #{cp_attrs.start_date}")
-          end
-
-          entry =
-            cp_attrs
-            |> Map.put(:car_id, car_id)
-            |> Map.take([
-              :car_id, :start_date, :end_date, :charge_energy_added,
-              :charge_energy_used, :start_ideal_range_km, :end_ideal_range_km,
-              :start_rated_range_km, :end_rated_range_km, :start_battery_level,
-              :end_battery_level, :duration_min, :outside_temp_avg, :cost
-            ])
-
-          item =
-            case %ChargingProcess{car_id: car_id, position_id: position_id}
-                 |> ChargingProcess.changeset(entry)
-                 |> Repo.insert() do
-              {:ok, cp} ->
-                {tl_id, cp.id}
-
-              {:error, changeset} ->
-                Logger.warning("Skipping charging_process at #{cp_attrs.start_date}: #{inspect(changeset.errors)}")
                 nil
-            end
+              else
+                entry =
+                  cp_attrs
+                  |> Map.put(:car_id, car_id)
+                  |> Map.take([
+                    :car_id,
+                    :start_date,
+                    :end_date,
+                    :charge_energy_added,
+                    :charge_energy_used,
+                    :start_ideal_range_km,
+                    :end_ideal_range_km,
+                    :start_rated_range_km,
+                    :end_rated_range_km,
+                    :start_battery_level,
+                    :end_battery_level,
+                    :duration_min,
+                    :outside_temp_avg,
+                    :cost
+                  ])
 
-          new_count = count + 1
-          if rem(new_count, @progress_interval) == 0, do: progress_fn.(new_count, total)
+                case %ChargingProcess{car_id: car_id, position_id: position_id}
+                     |> ChargingProcess.changeset(entry)
+                     |> Repo.insert() do
+                  {:ok, cp} ->
+                    {tl_id, cp.id}
 
-          {item, new_count}
-        end)
+                  {:error, changeset} ->
+                    Logger.warning(
+                      "Skipping charging_process at #{cp_attrs.start_date}: #{inspect(changeset.errors)}"
+                    )
 
-      result
-      |> Enum.reject(&is_nil/1)
-      |> Map.new()
-    end, timeout: @transaction_timeout)
+                    nil
+                end
+              end
+
+            new_count = count + 1
+            if rem(new_count, @progress_interval) == 0, do: progress_fn.(new_count, total)
+
+            {item, new_count}
+          end)
+
+        result
+        |> Enum.reject(&is_nil/1)
+        |> Map.new()
+      end,
+      timeout: @transaction_timeout
+    )
   end
 
   @doc """
@@ -223,18 +306,33 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
         Enum.map(batch, fn charge ->
           charge
           |> Map.take([
-            :charging_process_id, :date, :battery_level,
-            :charge_energy_added, :charger_actual_current, :charger_phases,
-            :charger_pilot_current, :charger_power, :charger_voltage,
-            :conn_charge_cable, :fast_charger_present, :fast_charger_brand,
-            :fast_charger_type, :ideal_battery_range_km, :rated_battery_range_km,
-            :outside_temp, :battery_heater, :battery_heater_on,
-            :battery_heater_no_power, :not_enough_power_to_heat
+            :charging_process_id,
+            :date,
+            :battery_level,
+            :charge_energy_added,
+            :charger_actual_current,
+            :charger_phases,
+            :charger_pilot_current,
+            :charger_power,
+            :charger_voltage,
+            :conn_charge_cable,
+            :fast_charger_present,
+            :fast_charger_brand,
+            :fast_charger_type,
+            :ideal_battery_range_km,
+            :rated_battery_range_km,
+            :outside_temp,
+            :battery_heater,
+            :battery_heater_on,
+            :battery_heater_no_power,
+            :not_enough_power_to_heat
           ])
           |> ensure_charge_defaults()
         end)
 
-      case Repo.transaction(fn -> Repo.insert_all(Charge, entries) end, timeout: @transaction_timeout) do
+      case Repo.transaction(fn -> Repo.insert_all(Charge, entries) end,
+             timeout: @transaction_timeout
+           ) do
         {:ok, {count, _}} ->
           new_inserted = inserted + count
           progress_fn.(new_inserted, total)
@@ -246,7 +344,9 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
       end
     end)
     |> case do
-      {:error, reason} -> {:error, reason}
+      {:error, reason} ->
+        {:error, reason}
+
       count ->
         {:ok, count}
     end
@@ -256,50 +356,66 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
   def insert_states(car_id, states, progress_fn \\ fn _, _ -> :ok end) do
     total = length(states)
 
-    Repo.transaction(fn ->
-      Enum.reduce(states, 0, fn state_attrs, count ->
-        entry =
-          state_attrs
-          |> Map.put(:car_id, car_id)
-          |> Map.take([:car_id, :state, :start_date, :end_date])
+    Repo.transaction(
+      fn ->
+        Enum.reduce(states, 0, fn state_attrs, count ->
+          entry =
+            state_attrs
+            |> Map.put(:car_id, car_id)
+            |> Map.take([:car_id, :state, :start_date, :end_date])
 
-        new_count =
-          case %State{car_id: car_id} |> State.changeset(entry) |> Repo.insert() do
-            {:ok, _} -> count + 1
-            {:error, changeset} ->
-              Logger.warning("Skipping state at #{state_attrs.start_date}: #{inspect(changeset.errors)}")
-              count
-          end
+          new_count =
+            case %State{car_id: car_id} |> State.changeset(entry) |> Repo.insert() do
+              {:ok, _} ->
+                count + 1
 
-        if rem(new_count, @progress_interval) == 0, do: progress_fn.(new_count, total)
-        new_count
-      end)
-    end, timeout: @transaction_timeout)
+              {:error, changeset} ->
+                Logger.warning(
+                  "Skipping state at #{state_attrs.start_date}: #{inspect(changeset.errors)}"
+                )
+
+                count
+            end
+
+          if rem(new_count, @progress_interval) == 0, do: progress_fn.(new_count, total)
+          new_count
+        end)
+      end,
+      timeout: @transaction_timeout
+    )
   end
 
   @doc "Inserts updates within a transaction."
   def insert_updates(car_id, updates, progress_fn \\ fn _, _ -> :ok end) do
     total = length(updates)
 
-    Repo.transaction(fn ->
-      Enum.reduce(updates, 0, fn update_attrs, count ->
-        entry =
-          update_attrs
-          |> Map.put(:car_id, car_id)
-          |> Map.take([:car_id, :start_date, :end_date, :version])
+    Repo.transaction(
+      fn ->
+        Enum.reduce(updates, 0, fn update_attrs, count ->
+          entry =
+            update_attrs
+            |> Map.put(:car_id, car_id)
+            |> Map.take([:car_id, :start_date, :end_date, :version])
 
-        new_count =
-          case %Update{car_id: car_id} |> Update.changeset(entry) |> Repo.insert() do
-            {:ok, _} -> count + 1
-            {:error, changeset} ->
-              Logger.warning("Skipping update at #{update_attrs.start_date}: #{inspect(changeset.errors)}")
-              count
-          end
+          new_count =
+            case %Update{car_id: car_id} |> Update.changeset(entry) |> Repo.insert() do
+              {:ok, _} ->
+                count + 1
 
-        if rem(new_count, @progress_interval) == 0, do: progress_fn.(new_count, total)
-        new_count
-      end)
-    end, timeout: @transaction_timeout)
+              {:error, changeset} ->
+                Logger.warning(
+                  "Skipping update at #{update_attrs.start_date}: #{inspect(changeset.errors)}"
+                )
+
+                count
+            end
+
+          if rem(new_count, @progress_interval) == 0, do: progress_fn.(new_count, total)
+          new_count
+        end)
+      end,
+      timeout: @transaction_timeout
+    )
   end
 
   ## Import Mode Functions
@@ -312,7 +428,8 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
     counts = %{
       positions: Repo.aggregate(from(p in Position, where: p.car_id == ^car_id), :count),
       drives: Repo.aggregate(from(d in Drive, where: d.car_id == ^car_id), :count),
-      charging_processes: Repo.aggregate(from(c in ChargingProcess, where: c.car_id == ^car_id), :count),
+      charging_processes:
+        Repo.aggregate(from(c in ChargingProcess, where: c.car_id == ^car_id), :count),
       states: Repo.aggregate(from(s in State, where: s.car_id == ^car_id), :count),
       updates: Repo.aggregate(from(u in Update, where: u.car_id == ^car_id), :count)
     }
@@ -393,21 +510,27 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
   end
 
   @doc """
-  Deletes records in a queryable that overlap with consolidated time ranges.
-  FK-safe deletion order for Mode C (TeslaLogger priority):
-  1. charging_processes (has ON DELETE RESTRICT on position_id)
-  2. positions
-  3. drives
-  4. states, updates
+  Deletes TeslaMate records that overlap with the given per-entity time ranges.
+  Each entity is deleted only where TeslaLogger will re-insert the same kind of
+  data — deleting everything within one giant min/max range would wipe TeslaMate
+  data in TeslaLogger gaps (logger outages) without replacement.
+
+  FK-safe deletion order: charging_processes (ON DELETE RESTRICT on position_id)
+  before positions, then drives, states, updates.
   """
-  def delete_overlapping_data(car_id, consolidated_ranges) do
-    # FK-safe order: CPs (RESTRICT on position_id) → positions → drives → states → updates
-    cp_deleted = delete_overlapping_ranges(car_id, ChargingProcess, consolidated_ranges)
-    cp_orphan_deleted = delete_charging_processes_referencing_positions(car_id, consolidated_ranges)
-    pos_deleted = delete_positions_in_ranges(car_id, consolidated_ranges)
-    drives_deleted = delete_overlapping_ranges(car_id, Drive, consolidated_ranges)
-    states_deleted = delete_overlapping_ranges(car_id, State, consolidated_ranges)
-    updates_deleted = delete_overlapping_ranges(car_id, Update, consolidated_ranges)
+  def delete_overlapping_data(car_id, %{} = ranges_by_entity) do
+    pos_ranges = Map.get(ranges_by_entity, :positions, [])
+    drive_ranges = Map.get(ranges_by_entity, :drives, [])
+    cp_ranges = Map.get(ranges_by_entity, :charging_processes, [])
+    state_ranges = Map.get(ranges_by_entity, :states, [])
+    update_ranges = Map.get(ranges_by_entity, :updates, [])
+
+    cp_deleted = delete_overlapping_ranges(car_id, ChargingProcess, cp_ranges)
+    cp_orphan_deleted = delete_charging_processes_referencing_positions(car_id, pos_ranges)
+    pos_deleted = delete_positions_in_ranges(car_id, pos_ranges)
+    drives_deleted = delete_overlapping_ranges(car_id, Drive, drive_ranges)
+    states_deleted = delete_overlapping_ranges(car_id, State, state_ranges)
+    updates_deleted = delete_overlapping_ranges(car_id, Update, update_ranges)
 
     result = %{
       charging_processes: cp_deleted + cp_orphan_deleted,
@@ -426,12 +549,15 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
     delete_in_ranges(consolidated_ranges, fn range_start, range_end ->
       if range_end == nil do
         from(r in queryable,
-          where: r.car_id == ^car_id and (is_nil(r.end_date) or r.end_date >= ^range_start))
+          where: r.car_id == ^car_id and (is_nil(r.end_date) or r.end_date >= ^range_start)
+        )
       else
         from(r in queryable,
-          where: r.car_id == ^car_id
-            and r.start_date <= ^range_end
-            and (is_nil(r.end_date) or r.end_date >= ^range_start))
+          where:
+            r.car_id == ^car_id and
+              r.start_date <= ^range_end and
+              (is_nil(r.end_date) or r.end_date >= ^range_start)
+        )
       end
     end)
   end
@@ -443,7 +569,8 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
         from(p in Position, where: p.car_id == ^car_id and p.date >= ^range_start)
       else
         from(p in Position,
-          where: p.car_id == ^car_id and p.date >= ^range_start and p.date <= ^range_end)
+          where: p.car_id == ^car_id and p.date >= ^range_start and p.date <= ^range_end
+        )
       end
     end)
   end
@@ -469,11 +596,13 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
         else
           from(p in Position,
             where: p.car_id == ^car_id and p.date >= ^range_start and p.date <= ^range_end,
-            select: p.id)
+            select: p.id
+          )
         end
 
       from(cp in ChargingProcess,
-        where: cp.car_id == ^car_id and cp.position_id in subquery(pos_ids_query))
+        where: cp.car_id == ^car_id and cp.position_id in subquery(pos_ids_query)
+      )
     end)
   end
 
@@ -535,8 +664,12 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
     collect_until(sorted_array, idx, :array.size(sorted_array), end_unix, &elem(&1, 1))
   end
 
-  @doc "Finds the ID of the nearest entry to `target_unix`."
-  def find_nearest(sorted_array, target_unix) do
+  @doc """
+  Finds the ID of the nearest entry to `target_unix`.
+  With `max_delta_seconds` set, returns nil if the nearest entry is further away —
+  prevents associating a charging process with a position hours away (wrong address).
+  """
+  def find_nearest(sorted_array, target_unix, max_delta_seconds \\ nil) do
     size = :array.size(sorted_array)
 
     if size == 0 do
@@ -544,14 +677,24 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
     else
       idx = binary_search_left(sorted_array, target_unix)
 
-      cond do
-        idx >= size -> elem(:array.get(size - 1, sorted_array), 1)
-        idx == 0 -> elem(:array.get(0, sorted_array), 1)
-        true ->
-          {unix_left, val_left} = :array.get(idx - 1, sorted_array)
-          {unix_right, val_right} = :array.get(idx, sorted_array)
-          if abs(target_unix - unix_left) <= abs(unix_right - target_unix), do: val_left, else: val_right
-      end
+      {unix, val} =
+        cond do
+          idx >= size ->
+            :array.get(size - 1, sorted_array)
+
+          idx == 0 ->
+            :array.get(0, sorted_array)
+
+          true ->
+            {unix_left, _} = left = :array.get(idx - 1, sorted_array)
+            {unix_right, _} = right = :array.get(idx, sorted_array)
+
+            if abs(target_unix - unix_left) <= abs(unix_right - target_unix),
+              do: left,
+              else: right
+        end
+
+      if max_delta_seconds && abs(target_unix - unix) > max_delta_seconds, do: nil, else: val
     end
   end
 
