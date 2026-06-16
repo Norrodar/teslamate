@@ -18,6 +18,8 @@ defmodule TeslaMate.Import.TeslaLogger do
     :mysql_conn,
     status: Status.initial(),
     car_mapping: %{},
+    # nil = import all cars; a list restricts the import to those TeslaLogger car ids
+    car_ids: nil,
     date_to_pos_id: %{},
     pos_attrs_by_date: %{}
   ]
@@ -127,9 +129,10 @@ defmodule TeslaMate.Import.TeslaLogger do
 
       true ->
         mode = Keyword.get(opts, :mode, :clean)
+        car_ids = Keyword.get(opts, :car_ids)
         # Fresh position lookup per run — stale entries from a previous run would
         # point at deleted rows.
-        state = %{state | car_mapping: car_mapping, date_to_pos_id: %{}}
+        state = %{state | car_mapping: car_mapping, car_ids: car_ids, date_to_pos_id: %{}}
         state = update_status(state, fn s -> %{s | import_mode: mode} end)
         send(self(), :start_import)
         {:reply, :ok, state}
@@ -525,8 +528,18 @@ defmodule TeslaMate.Import.TeslaLogger do
     conn = state.mysql_conn
 
     case MysqlReader.read_cars(conn) do
-      {:ok, tl_cars} ->
-        Logger.info("Found #{length(tl_cars)} car(s) in TeslaLogger")
+      {:ok, all_tl_cars} ->
+        # Restrict to the cars selected in the wizard (nil = all).
+        tl_cars =
+          case state.car_ids do
+            nil -> all_tl_cars
+            ids -> Enum.filter(all_tl_cars, fn c -> c["id"] in ids end)
+          end
+
+        Logger.info(
+          "Found #{length(all_tl_cars)} car(s) in TeslaLogger, importing #{length(tl_cars)}"
+        )
+
         car_count = length(tl_cars)
         state = update_status(state, fn s -> %{s | car_count: car_count} end)
         state = update_status(state, &Status.start_step(&1, :cars, car_count))

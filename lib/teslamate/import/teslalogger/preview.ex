@@ -6,7 +6,7 @@ defmodule TeslaMate.Import.TeslaLogger.Preview do
   # on the most recent drives and charging sessions, then flags rows the import
   # would later filter or that look suspicious.
 
-  alias TeslaMate.Import.TeslaLogger.{Mapper, MysqlReader}
+  alias TeslaMate.Import.TeslaLogger.{Mapper, MysqlReader, Writer}
 
   @sample_limit 5
 
@@ -17,18 +17,35 @@ defmodule TeslaMate.Import.TeslaLogger.Preview do
   """
   def build(conn, car_info, timezone) do
     tl_car_id = car_info["id"]
+    tm_car_id = car_info["tm_car_id"]
+
+    # Existing TeslaMate ranges for the matched car — used to mark each sample row
+    # as overlapping TM data (so the UI can show "kept/replaced/imported" per mode).
+    tm_drive_ranges = if tm_car_id, do: Writer.load_existing_ranges(tm_car_id, :drives), else: []
+
+    tm_charge_ranges =
+      if tm_car_id, do: Writer.load_existing_ranges(tm_car_id, :charging_processes), else: []
 
     with {:ok, drive_rows} <- MysqlReader.read_recent_drives(conn, tl_car_id, @sample_limit),
          {:ok, cp_rows} <-
            MysqlReader.read_recent_charging_sessions(conn, tl_car_id, @sample_limit) do
-      drives = Enum.map(drive_rows, &build_drive(conn, &1, timezone))
-      charges = Enum.map(cp_rows, &build_charge(conn, tl_car_id, &1, timezone))
+      drives =
+        Enum.map(drive_rows, fn row ->
+          d = build_drive(conn, row, timezone)
+          Map.put(d, :tm_overlap, overlaps_tm?(d, tm_drive_ranges))
+        end)
+
+      charges =
+        Enum.map(cp_rows, fn row ->
+          c = build_charge(conn, tl_car_id, row, timezone)
+          Map.put(c, :tm_overlap, overlaps_tm?(c, tm_charge_ranges))
+        end)
 
       preview = %{
         tl_car_id: tl_car_id,
         display_name: car_info["display_name"],
         vin: car_info["vin"],
-        tm_car_id: car_info["tm_car_id"],
+        tm_car_id: tm_car_id,
         drives: drives,
         charges: charges,
         issues: detect_issues(car_info, drives, charges)
@@ -37,6 +54,11 @@ defmodule TeslaMate.Import.TeslaLogger.Preview do
       {:ok, preview}
     end
   end
+
+  # A row overlaps TeslaMate when its time range intersects an existing TM range.
+  defp overlaps_tm?(%{start_date: nil}, _ranges), do: false
+  defp overlaps_tm?(_row, []), do: false
+  defp overlaps_tm?(row, ranges), do: Writer.filter_non_overlapping([row], ranges) == []
 
   # Mirrors the import pipeline: map_drive + enrich with the TL boundary positions
   # (StartPos/EndPos provide odometer and ranges — enough for the preview).
