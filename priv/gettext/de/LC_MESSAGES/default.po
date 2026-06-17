@@ -130,8 +130,8 @@ msgstr "Einheiten"
 
 #: lib/teslamate_web/live/charge_live/cost.html.heex:165
 #: lib/teslamate_web/live/geofence_live/form.html.heex:124
-#: lib/teslamate_web/live/import_live/teslalogger.ex:973
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1178
+#: lib/teslamate_web/live/import_live/teslalogger.ex:980
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1185
 #, elixir-autogen, elixir-format
 msgid "Back"
 msgstr "Zurück"
@@ -406,7 +406,7 @@ msgstr "Ladekosten"
 
 #: lib/teslamate_web/live/charge_live/cost.html.heex:132
 #: lib/teslamate_web/live/geofence_live/form.html.heex:64
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1306
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1313
 #, elixir-autogen, elixir-format
 msgid "Cost"
 msgstr "Kosten"
@@ -455,7 +455,7 @@ msgstr[1] "%{count} Dateien gefunden"
 
 #: lib/teslamate_web/live/import_live/index.ex:34
 #: lib/teslamate_web/live/import_live/index.html.heex:89
-#: lib/teslamate_web/live/import_live/teslalogger.ex:815
+#: lib/teslamate_web/live/import_live/teslalogger.ex:822
 #, elixir-autogen, elixir-format
 msgid "Import"
 msgstr "Importieren"
@@ -717,12 +717,12 @@ msgstr "Design"
 msgid "<strong>This mode deletes existing TeslaMate data</strong> in time periods that overlap with TeslaLogger data."
 msgstr "<strong>Dieser Modus löscht vorhandene TeslaMate-Daten</strong> in Zeiträumen, die sich mit TeslaLogger-Daten überschneiden."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1194
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1201
 #, elixir-autogen, elixir-format
 msgid "A car has no VIN — go back and enter one manually before continuing."
 msgstr "Ein Fahrzeug hat keine VIN — gehe zurück und gib sie manuell ein, bevor du fortfährst."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1304
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1311
 #, elixir-autogen, elixir-format
 msgid "Added"
 msgstr "Geladen"
@@ -732,12 +732,12 @@ msgstr "Geladen"
 msgid "Cancel"
 msgstr "Abbrechen"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:852
+#: lib/teslamate_web/live/import_live/teslalogger.ex:859
 #, elixir-autogen, elixir-format
 msgid "Car %{id}"
 msgstr "Fahrzeug %{id}"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1463
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1470
 #, elixir-autogen, elixir-format
 msgid "Cars"
 msgstr "Fahrzeuge"
@@ -747,43 +747,43 @@ msgstr "Fahrzeuge"
 msgid "Change connection"
 msgstr "Verbindung ändern"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1466
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1473
 #, elixir-autogen, elixir-format
 msgid "Charges"
 msgstr "Ladepunkte"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1467
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1474
 #, elixir-autogen, elixir-format
 msgid "Charging Sessions"
 msgstr "Ladevorgänge"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1437
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1444
 #, elixir-autogen, elixir-format
 msgid "Checking TeslaMate database"
 msgstr "Prüfe TeslaMate-Datenbank"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1435
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1442
 #, elixir-autogen, elixir-format
 msgid "Checking database schema"
 msgstr "Prüfe Datenbankschema"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:812
+#: lib/teslamate_web/live/import_live/teslalogger.ex:819
 #, elixir-autogen, elixir-format
 msgid "Checks"
 msgstr "Prüfungen"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1093
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1476
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1100
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1483
 #, elixir-autogen, elixir-format
 msgid "Clean database"
 msgstr "Leere Datenbank"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1433
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1440
 #, elixir-autogen, elixir-format
 msgid "Connecting to MySQL"
 msgstr "Verbinde mit MySQL"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:811
+#: lib/teslamate_web/live/import_live/teslalogger.ex:818
 #, elixir-autogen, elixir-format
 msgid "Connection"
 msgstr "Verbindung"
@@ -793,7 +793,7 @@ msgstr "Verbindung"
 msgid "Connection failed:"
 msgstr "Verbindung fehlgeschlagen:"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:981
+#: lib/teslamate_web/live/import_live/teslalogger.ex:988
 #, elixir-autogen, elixir-format
 msgid "Continue to preview"
 msgstr "Weiter zur Vorschau"
@@ -808,34 +808,34 @@ msgstr "Datenbank"
 msgid "Database Connection"
 msgstr "Datenbankverbindung"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1137
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1144
 #, elixir-autogen, elixir-format
 msgid "Deletes overlapping TeslaMate data and replaces it with TeslaLogger data!"
 msgstr "Löscht überlappende TeslaMate-Daten und ersetzt sie durch TeslaLogger-Daten!"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1486
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1495
 #, elixir-autogen, elixir-format
 msgid "Deleting overlaps…"
 msgstr "Lösche Überlappungen…"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1263
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1270
 #, elixir-autogen, elixir-format
 msgid "Distance"
 msgstr "Distanz"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1051
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1488
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1058
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1497
 #, elixir-autogen, elixir-format
 msgid "Done"
 msgstr "Fertig"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1465
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1472
 #, elixir-autogen, elixir-format
 msgid "Drives"
 msgstr "Fahrten"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1262
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1302
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1269
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1309
 #, elixir-autogen, elixir-format
 msgid "Duration"
 msgstr "Dauer"
@@ -845,22 +845,22 @@ msgstr "Dauer"
 msgid "Enter the connection details for your TeslaLogger MySQL database."
 msgstr "Gib die Verbindungsdaten deiner TeslaLogger-MySQL-Datenbank ein."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1095
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1102
 #, elixir-autogen, elixir-format
 msgid "Expects an empty TeslaMate database for this vehicle. Aborts if data already exists."
 msgstr "Erwartet eine leere TeslaMate-Datenbank für dieses Fahrzeug. Bricht ab, wenn bereits Daten vorhanden sind."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1053
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1060
 #, elixir-autogen, elixir-format
 msgid "Failed"
 msgstr "Fehlgeschlagen"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1485
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1494
 #, elixir-autogen, elixir-format
 msgid "Filtering overlaps…"
 msgstr "Filtere Überlappungen…"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1470
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1477
 #, elixir-autogen, elixir-format
 msgid "Geocoding"
 msgstr "Geocoding"
@@ -875,7 +875,7 @@ msgstr "Host"
 msgid "IANA timezone of your TeslaLogger data (e.g. Europe/Berlin)"
 msgstr "IANA-Zeitzone deiner TeslaLogger-Daten (z. B. Europe/Berlin)"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1078
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1085
 #, elixir-autogen, elixir-format
 msgid "Import Mode"
 msgstr "Import-Modus"
@@ -895,89 +895,89 @@ msgstr "Importiert"
 msgid "Importing %{count} car(s) from TeslaLogger"
 msgstr "Importiere %{count} Fahrzeug(e) aus TeslaLogger"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1487
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1496
 #, elixir-autogen, elixir-format
 msgid "Inserting…"
 msgstr "Füge ein…"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1292
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1299
 #, elixir-autogen, elixir-format
 msgid "Last charging sessions"
 msgstr "Letzte Ladevorgänge"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1252
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1259
 #, elixir-autogen, elixir-format
 msgid "Last drives"
 msgstr "Letzte Fahrten"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1156
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1163
 #, elixir-autogen, elixir-format
 msgid "Loading sample data from TeslaLogger…"
 msgstr "Lade Beispieldaten aus TeslaLogger…"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:906
+#: lib/teslamate_web/live/import_live/teslalogger.ex:913
 #, elixir-autogen, elixir-format
 msgid "Manual entry (VIN / EID / VID for a car without a VIN)"
 msgstr "Manuelle Eingabe (VIN / EID / VID für ein Fahrzeug ohne VIN)"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1483
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1490
 #, elixir-autogen, elixir-format
 msgid "Mapping…"
 msgstr "Mappe…"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1133
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1478
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1140
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1485
 #, elixir-autogen, elixir-format
 msgid "Merge (TeslaLogger priority)"
 msgstr "Zusammenführen (TeslaLogger-Priorität)"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1113
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1477
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1120
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1484
 #, elixir-autogen, elixir-format
 msgid "Merge (TeslaMate priority)"
 msgstr "Zusammenführen (TeslaMate-Priorität)"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1241
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1248
 #, elixir-autogen, elixir-format
 msgid "New car will be created"
 msgstr "Neues Fahrzeug wird angelegt"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1246
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1253
 #, elixir-autogen, elixir-format
 msgid "No VIN — import would abort"
 msgstr "Keine VIN — Import würde abbrechen"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1295
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1302
 #, elixir-autogen, elixir-format
 msgid "No charging sessions found"
 msgstr "Keine Ladevorgänge gefunden"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1255
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1262
 #, elixir-autogen, elixir-format
 msgid "No drives found"
 msgstr "Keine Fahrten gefunden"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1141
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1148
 #, elixir-autogen, elixir-format
 msgid "No existing TeslaMate data — merge not needed."
 msgstr "Keine vorhandenen TeslaMate-Daten — Zusammenführen nicht nötig."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1337
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1344
 #, elixir-autogen, elixir-format
 msgid "No issues found in the sample"
 msgstr "Keine Auffälligkeiten in der Stichprobe"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:835
+#: lib/teslamate_web/live/import_live/teslalogger.ex:842
 #, elixir-autogen, elixir-format
 msgid "No vehicles found in TeslaLogger."
 msgstr "Keine Fahrzeuge in TeslaLogger gefunden."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1264
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1271
 #, elixir-autogen, elixir-format
 msgid "Odometer"
 msgstr "Kilometerstand"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1115
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1122
 #, elixir-autogen, elixir-format
 msgid "Only imports data for periods where TeslaMate has no data. Existing TeslaMate data is kept."
 msgstr "Importiert nur Daten für Zeiträume ohne TeslaMate-Daten. Vorhandene TeslaMate-Daten bleiben erhalten."
@@ -997,7 +997,7 @@ msgstr "Phase"
 msgid "Port"
 msgstr "Port"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1464
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1471
 #, elixir-autogen, elixir-format
 msgid "Positions"
 msgstr "Positionen"
@@ -1007,17 +1007,17 @@ msgstr "Positionen"
 msgid "Preflight Check"
 msgstr "Vorabprüfung"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:814
+#: lib/teslamate_web/live/import_live/teslalogger.ex:821
 #, elixir-autogen, elixir-format
 msgid "Preview"
 msgstr "Vorschau"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1162
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1169
 #, elixir-autogen, elixir-format
 msgid "Preview failed:"
 msgstr "Vorschau fehlgeschlagen:"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1149
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1156
 #, elixir-autogen, elixir-format
 msgid "Preview — this is what your data would look like"
 msgstr "Vorschau — so würden deine Daten aussehen"
@@ -1027,50 +1027,50 @@ msgstr "Vorschau — so würden deine Daten aussehen"
 msgid "Progress"
 msgstr "Fortschritt"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1482
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1489
 #, elixir-autogen, elixir-format
 msgid "Reading MySQL…"
 msgstr "Lese MySQL…"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1436
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1443
 #, elixir-autogen, elixir-format
 msgid "Reading TeslaLogger data"
 msgstr "Lese TeslaLogger-Daten"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1167
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1174
 #, elixir-autogen, elixir-format
 msgid "Retry"
 msgstr "Erneut versuchen"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:832
+#: lib/teslamate_web/live/import_live/teslalogger.ex:839
 #, elixir-autogen, elixir-format
 msgid "Select vehicles to import"
 msgstr "Fahrzeuge für den Import auswählen"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1261
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1301
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1268
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1308
 #, elixir-autogen, elixir-format
 msgid "Start (UTC)"
 msgstr "Start (UTC)"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1260
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1300
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1267
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1307
 #, elixir-autogen, elixir-format
 msgid "Start (local)"
 msgstr "Start (lokal)"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1188
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1195
 #, elixir-autogen, elixir-format
 msgid "Start Import"
 msgstr "Import starten"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1055
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1184
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1062
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1191
 #, elixir-autogen, elixir-format
 msgid "Starting…"
 msgstr "Starte…"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1468
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1475
 #, elixir-autogen, elixir-format
 msgid "States"
 msgstr "Zustände"
@@ -1080,7 +1080,7 @@ msgstr "Zustände"
 msgid "Step"
 msgstr "Schritt"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1227
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1234
 #, elixir-autogen, elixir-format
 msgid "TL Car %{id}"
 msgstr "TL-Fahrzeug %{id}"
@@ -1090,22 +1090,22 @@ msgstr "TL-Fahrzeug %{id}"
 msgid "TeslaLogger Import"
 msgstr ""
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:872
+#: lib/teslamate_web/live/import_live/teslalogger.ex:879
 #, elixir-autogen, elixir-format
 msgid "TeslaLogger: %{drives} drives, %{charges} charges, %{positions} positions"
 msgstr "TeslaLogger: %{drives} Fahrten, %{charges} Ladevorgänge, %{positions} Positionen"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1237
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1244
 #, elixir-autogen, elixir-format
 msgid "TeslaMate car #%{id} (existing, matched by VIN)"
 msgstr "TeslaMate-Fahrzeug #%{id} (vorhanden, über VIN zugeordnet)"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:888
+#: lib/teslamate_web/live/import_live/teslalogger.ex:895
 #, elixir-autogen, elixir-format
 msgid "TeslaMate: %{counts}"
 msgstr "TeslaMate: %{counts}"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:894
+#: lib/teslamate_web/live/import_live/teslalogger.ex:901
 #, elixir-autogen, elixir-format
 msgid "TeslaMate: no existing data"
 msgstr "TeslaMate: keine vorhandenen Daten"
@@ -1130,12 +1130,12 @@ msgstr "Das kann nicht rückgängig gemacht werden! Stelle sicher, dass du ein B
 msgid "Timezone"
 msgstr "Zeitzone"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1469
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1476
 #, elixir-autogen, elixir-format
 msgid "Updates"
 msgstr "Updates"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1305
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1312
 #, elixir-autogen, elixir-format
 msgid "Used"
 msgstr "Verbraucht"
@@ -1145,37 +1145,37 @@ msgstr "Verbraucht"
 msgid "Username"
 msgstr "Benutzername"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:912
+#: lib/teslamate_web/live/import_live/teslalogger.ex:919
 #, elixir-autogen, elixir-format
 msgid "VIN"
 msgstr "VIN"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:865
+#: lib/teslamate_web/live/import_live/teslalogger.ex:872
 #, elixir-autogen, elixir-format
 msgid "VIN: not found — use manual entry below"
 msgstr "VIN: nicht gefunden — nutze die manuelle Eingabe unten"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1434
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1441
 #, elixir-autogen, elixir-format
 msgid "Validating timezone"
 msgstr "Prüfe Zeitzone"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1484
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1493
 #, elixir-autogen, elixir-format
 msgid "Validating…"
 msgstr "Validiere…"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1471
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1478
 #, elixir-autogen, elixir-format
 msgid "Validation"
 msgstr "Validierung"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:734
+#: lib/teslamate_web/live/import_live/teslalogger.ex:741
 #, elixir-autogen, elixir-format
 msgid "Validation Warnings"
 msgstr ""
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:813
+#: lib/teslamate_web/live/import_live/teslalogger.ex:820
 #, elixir-autogen, elixir-format
 msgid "Vehicles"
 msgstr "Fahrzeuge"
@@ -1190,53 +1190,53 @@ msgstr "Warnung: Destruktiver Import"
 msgid "Yes, start import"
 msgstr "Ja, Import starten"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1361
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1368
 #, elixir-autogen, elixir-format
 msgid "import (TL)"
 msgstr "Import (TL)"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1208
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1215
 #, elixir-autogen, elixir-format
 msgid "imported from TeslaLogger"
 msgstr "aus TeslaLogger importiert"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1359
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1366
 #, elixir-autogen, elixir-format
 msgid "kept (TM)"
 msgstr "behalten (TM)"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1211
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1218
 #, elixir-autogen, elixir-format
 msgid "kept from TeslaMate"
 msgstr "aus TeslaMate behalten"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:931
-#: lib/teslamate_web/live/import_live/teslalogger.ex:951
+#: lib/teslamate_web/live/import_live/teslalogger.ex:938
+#: lib/teslamate_web/live/import_live/teslalogger.ex:958
 #, elixir-autogen, elixir-format
 msgid "optional"
 msgstr "optional"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1360
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1367
 #, elixir-autogen, elixir-format
 msgid "replaces TM"
 msgstr "ersetzt TM"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1214
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1221
 #, elixir-autogen, elixir-format
 msgid "replaces TeslaMate"
 msgstr "ersetzt TeslaMate"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1044
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1051
 #, elixir-autogen, elixir-format
 msgid "%{count} h"
 msgstr "%{count} Std."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1039
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1046
 #, elixir-autogen, elixir-format
 msgid "%{count} min"
 msgstr "%{count} Min."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1036
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1043
 #, elixir-autogen, elixir-format
 msgid "< 1 min"
 msgstr "< 1 Min."
@@ -1246,7 +1246,7 @@ msgstr "< 1 Min."
 msgid "<strong>%{count}</strong> addresses need reverse geocoding via Nominatim (rate limit: ~1 request per 2 seconds)."
 msgstr "<strong>%{count}</strong> Adressen müssen per Nominatim rückwärts geocodiert werden (Limit: ~1 Anfrage pro 2 Sekunden)."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:719
+#: lib/teslamate_web/live/import_live/teslalogger.ex:724
 #, elixir-autogen, elixir-format
 msgid "All addresses already resolved. Check the Grafana dashboards to verify the imported data."
 msgstr "Alle Adressen bereits aufgelöst. Prüfe die Grafana-Dashboards, um die importierten Daten zu verifizieren."
@@ -1261,17 +1261,17 @@ msgstr "Geschätzte Dauer:"
 msgid "Import complete!"
 msgstr "Import abgeschlossen!"
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:709
+#: lib/teslamate_web/live/import_live/teslalogger.ex:712
 #, elixir-autogen, elixir-format
 msgid "This runs automatically in the background."
 msgstr "Läuft automatisch im Hintergrund."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:713
+#: lib/teslamate_web/live/import_live/teslalogger.ex:718
 #, elixir-autogen, elixir-format
 msgid "Until geocoding is complete, some Grafana dashboards may show coordinates instead of addresses, and geofence filters may not match all entries."
 msgstr "Bis das Geocoding fertig ist, zeigen manche Grafana-Dashboards Koordinaten statt Adressen, und Geofence-Filter erfassen evtl. nicht alle Einträge."
 
-#: lib/teslamate_web/live/import_live/teslalogger.ex:1030
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1037
 #, elixir-autogen, elixir-format
 msgid "approx. %{duration} left"
 msgstr "ca. %{duration} verbleibend"
@@ -1280,3 +1280,13 @@ msgstr "ca. %{duration} verbleibend"
 #, elixir-autogen, elixir-format
 msgid "done around"
 msgstr "fertig gegen"
+
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1492
+#, elixir-autogen, elixir-format
+msgid "Filtering idle positions…"
+msgstr "Idle-Positionen filtern…"
+
+#: lib/teslamate_web/live/import_live/teslalogger.ex:1491
+#, elixir-autogen, elixir-format
+msgid "Merging tire pressures…"
+msgstr "Reifendrücke zuordnen…"

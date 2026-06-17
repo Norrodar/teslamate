@@ -332,22 +332,22 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
     <nav class="breadcrumb" aria-label="breadcrumbs">
       <ul>
         <li><.link navigate={~p"/"}><%= gettext("Home") %></.link></li>
-
+        
         <li class="is-active"><.link navigate="">TeslaLogger Import</.link></li>
       </ul>
     </nav>
 
     <h2 class="title is-4">TeslaLogger Import</h2>
-    <.wizard_steps current={@wizard_step} max={max_reachable_step(@status)} />
+     <.wizard_steps current={@wizard_step} max={max_reachable_step(@status)} />
     <%!-- Step 1: Connection Form --%>
     <%= if @wizard_step == 1 do %>
       <div class="box mb-4">
         <h3 class="title is-5"><%= gettext("Database Connection") %></h3>
-
+        
         <p class="mb-4 has-text-grey">
           <%= gettext("Enter the connection details for your TeslaLogger MySQL database.") %>
         </p>
-
+        
         <div class="columns">
           <div class="column is-two-thirds">
             <div class="field">
@@ -365,7 +365,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
               </div>
             </div>
           </div>
-
+          
           <div class="column">
             <div class="field">
               <label class="label"><%= gettext("Port") %></label>
@@ -383,7 +383,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
             </div>
           </div>
         </div>
-
+        
         <div class="columns">
           <div class="column">
             <div class="field">
@@ -401,7 +401,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
               </div>
             </div>
           </div>
-
+          
           <div class="column">
             <div class="field">
               <label class="label"><%= gettext("Password") %></label>
@@ -419,7 +419,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
             </div>
           </div>
         </div>
-
+        
         <div class="columns">
           <div class="column">
             <div class="field">
@@ -437,7 +437,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
               </div>
             </div>
           </div>
-
+          
           <div class="column">
             <div class="field">
               <label class="label"><%= gettext("Timezone") %></label>
@@ -452,20 +452,20 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                   phx-debounce="300"
                 />
               </div>
-
+              
               <p class="help">
                 <%= gettext("IANA timezone of your TeslaLogger data (e.g. Europe/Berlin)") %>
               </p>
             </div>
           </div>
         </div>
-
+        
         <%= if match?({:error, _}, @status.state) and not preflight_passed?(@status.preflight_steps) do %>
           <div class="notification is-danger is-light mb-3 py-2 px-3">
             <strong><%= gettext("Connection failed:") %></strong> <%= elem(@status.state, 1) %>
           </div>
         <% end %>
-
+        
         <div class="field mt-4">
           <div class="control">
             <button
@@ -480,19 +480,19 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         </div>
       </div>
     <% end %>
-    <%!-- Step 2: Preflight Check --%>
+     <%!-- Step 2: Preflight Check --%>
     <%= if @wizard_step == 2 do %>
       <div class="box mb-4">
         <div class="is-flex is-justify-content-space-between is-align-items-center mb-3">
           <h3 class="title is-5 mb-0"><%= gettext("Preflight Check") %></h3>
-
+          
           <%= if preflight_passed?(@status.preflight_steps) do %>
             <span class="icon has-text-success">
               <span class="mdi mdi-check-circle mdi-24px"></span>
             </span>
           <% end %>
         </div>
-
+        
         <%= for step <- @status.preflight_steps do %>
           <div class="is-flex is-align-items-center mb-2">
             <span class="icon mr-2">
@@ -507,7 +507,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                   <span class="mdi mdi-alert-circle has-text-danger"></span>
               <% end %>
             </span>
-
+            
             <span>
               <strong><%= preflight_step_label(step.name) %></strong>
               <%= if step.detail do %>
@@ -516,13 +516,13 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
             </span>
           </div>
         <% end %>
-
+        
         <div class="is-flex is-justify-content-space-between mt-4">
           <button class="button is-light" phx-click="reset_connection">
             <span class="icon"><span class="mdi mdi-pencil"></span></span>
             <span><%= gettext("Change connection") %></span>
           </button>
-
+          
           <button
             class="button is-success"
             phx-click="wizard_next"
@@ -534,7 +534,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         </div>
       </div>
     <% end %>
-    <%!-- Step 3: Vehicle selection --%>
+     <%!-- Step 3: Vehicle selection --%>
     <%= if @wizard_step == 3 do %>
       <.step_vehicles
         cars={@status.mysql_car_info}
@@ -545,7 +545,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         car_vid={@car_vid}
       />
     <% end %>
-    <%!-- Step 4: Import mode + live preview --%>
+     <%!-- Step 4: Import mode + live preview --%>
     <%= if @wizard_step == 4 do %>
       <.step_mode_preview
         status={@status}
@@ -554,19 +554,20 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         selected_car_ids={@selected_car_ids}
       />
     <% end %>
-    <%!-- Destructive Mode Confirmation Modal --%>
+     <%!-- Destructive Mode Confirmation Modal --%>
     <%= if @show_destructive_warning do %>
       <div class="modal is-active">
         <div class="modal-background" phx-click="cancel_destructive"></div>
-
+        
         <div class="modal-card">
           <header class="modal-card-head has-background-danger">
             <p class="modal-card-title has-text-white">
-              <span class="icon"><span class="mdi mdi-alert"></span></span>
-              <%= gettext("Warning: Destructive Import") %>
+              <span class="icon"><span class="mdi mdi-alert"></span></span> <%= gettext(
+                "Warning: Destructive Import"
+              ) %>
             </p>
           </header>
-
+          
           <section class="modal-card-body">
             <p class="mb-3">
               <%= raw(
@@ -575,12 +576,12 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                 )
               ) %>
             </p>
-
+            
             <p class="has-text-danger">
               <%= gettext("This cannot be undone! Make sure you have a backup.") %>
             </p>
           </section>
-
+          
           <footer class="modal-card-foot">
             <button class="button" phx-click="cancel_destructive"><%= gettext("Cancel") %></button>
             <button class="button is-danger" phx-click="confirm_destructive">
@@ -590,52 +591,48 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         </div>
       </div>
     <% end %>
-    <%!-- Step 5: Import Progress --%>
+     <%!-- Step 5: Import Progress --%>
     <%= if @wizard_step == 5 do %>
       <div class="box">
         <h3 class="title is-5"><%= gettext("Import Progress") %></h3>
-
-        <.progress_bar status={@status} />
-
+         <.progress_bar status={@status} />
         <%= if @status.car_count > 0 do %>
           <p class="mb-2">
             <%= gettext("Importing %{count} car(s) from TeslaLogger", count: @status.car_count) %>
           </p>
         <% end %>
-
+        
         <%= if @status.import_mode != :clean do %>
           <p class="mb-4">
             <span class="tag is-info is-light"><%= mode_label(@status.import_mode) %></span>
           </p>
         <% end %>
-
+        
         <table class="table is-fullwidth is-hoverable" style="table-layout: fixed;">
           <colgroup>
-            <col style="width: 22%;" />
-            <col style="width: 10%;" />
-            <col style="width: 28%;" />
-            <col style="width: 22%;" />
-            <col style="width: 18%;" />
+            <col style="width: 22%;" /> <col style="width: 10%;" /> <col style="width: 28%;" />
+            <col style="width: 22%;" /> <col style="width: 18%;" />
           </colgroup>
+          
           <thead>
             <tr>
               <th><%= gettext("Step") %></th>
-
+              
               <th><%= gettext("Status") %></th>
-
+              
               <th><%= gettext("Phase") %></th>
-
+              
               <th><%= gettext("Progress") %></th>
-
+              
               <th><%= gettext("Imported") %></th>
             </tr>
           </thead>
-
+          
           <tbody>
             <%= for step <- @status.steps do %>
               <tr>
                 <td><%= step_label(step.name) %></td>
-
+                
                 <td>
                   <span>
                     <%= case step.status do %>
@@ -656,17 +653,17 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                     <% end %>
                   </span>
                 </td>
-
+                
                 <td>
                   <span class={phase_color(step.phase)}>
                     <%= phase_label(step.phase) %>
                   </span>
                 </td>
-
+                
                 <td style="font-variant-numeric: tabular-nums;">
                   <%= format_progress(step) %>
                 </td>
-
+                
                 <td style="font-variant-numeric: tabular-nums;">
                   <%= cond do %>
                     <% step.status == :complete and step.total > 0 -> %>
@@ -688,21 +685,17 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
     <%= if @status.state == :complete do %>
       <div class="notification is-success is-light">
         <p class="mb-2"><strong><%= gettext("Import complete!") %></strong></p>
-
+        
         <%= if @status.geocoding_lookups > 0 do %>
           <p class="mb-2">
-            <span class="icon"><span class="mdi mdi-map-marker-multiple"></span></span>
-            <%= raw(
+            <span class="icon"><span class="mdi mdi-map-marker-multiple"></span></span> <%= raw(
               gettext(
                 "<strong>%{count}</strong> addresses need reverse geocoding via Nominatim (rate limit: ~1 request per 2 seconds).",
                 count: format_number(@status.geocoding_lookups)
               )
-            ) %>
-            <br />
-            <%= gettext("Estimated time:") %>
+            ) %> <br /> <%= gettext("Estimated time:") %>
             <strong><%= format_duration(@status.geocoding_lookups * 2) %></strong>
-            (<%= gettext("done around") %>
-            <strong>
+            (<%= gettext("done around") %> <strong>
               <span
                 id="geocoding-eta"
                 phx-hook="LocalTime"
@@ -713,7 +706,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
               "This runs automatically in the background."
             ) %>
           </p>
-
+          
           <p class="is-size-7">
             <%= gettext(
               "Until geocoding is complete, some Grafana dashboards may show coordinates instead of addresses, and geofence filters may not match all entries."
@@ -739,7 +732,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
     <%= if @status.warnings != [] do %>
       <div class="box mt-4">
         <h3 class="title is-5"><%= gettext("Validation Warnings") %></h3>
-
+        
         <div class="content" style="max-height: 400px; overflow-y: auto;">
           <%= for {category, warnings} <- group_warnings(@status.warnings) do %>
             <div class="mb-4">
@@ -748,19 +741,19 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                 <strong><%= warning_title(category) %></strong>
                 <span class="tag is-light is-rounded ml-1"><%= length(warnings) %></span>
               </p>
-
+              
               <p class="is-size-7 has-text-grey mb-2 ml-5"><%= warning_explanation(category) %></p>
-
+              
               <details class="ml-5">
                 <summary class="is-size-7 has-text-grey-light" style="cursor: pointer;">
                   Show details (<%= length(warnings) %> entries)
                 </summary>
-
+                
                 <ul class="is-size-7 mt-1">
                   <%= for warning <- Enum.take(warnings, 20) do %>
                     <li class="has-text-grey"><%= warning %></li>
                   <% end %>
-
+                  
                   <%= if length(warnings) > 20 do %>
                     <li class="has-text-grey-light">... and <%= length(warnings) - 20 %> more</li>
                   <% end %>
@@ -791,7 +784,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
             </div>
           </div>
         <% end %>
-
+        
         <div class="has-text-centered" style="min-width: 4.5rem;">
           <span
             class={wizard_circle_class(n, @current)}
@@ -805,7 +798,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
               <%= n %>
             <% end %>
           </span>
-
+          
           <p class={"is-size-7 mt-1 #{if n == @current, do: "has-text-weight-bold"}"}><%= label %></p>
         </div>
       <% end %>
@@ -837,7 +830,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
     ~H"""
     <div class="box mb-4">
       <h3 class="title is-5"><%= gettext("Select vehicles to import") %></h3>
-
+      
       <%= if @cars == [] do %>
         <p class="has-text-grey"><%= gettext("No vehicles found in TeslaLogger.") %></p>
       <% else %>
@@ -856,10 +849,13 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
               />
               <div>
                 <p class="mb-1">
-                  <strong><%= gettext("Car %{id}", id: car["id"]) %></strong>
-                  <%= if car["display_name"], do: "— „#{car["display_name"]}”" %>
+                  <strong><%= gettext("Car %{id}", id: car["id"]) %></strong> <%= if car[
+                                                                                       "display_name"
+                                                                                     ],
+                                                                                     do:
+                                                                                       "— „#{car["display_name"]}”" %>
                 </p>
-
+                
                 <p class="mb-1">
                   <%= if car["vin"] && car["vin"] != "" do %>
                     <span class="icon-text">
@@ -873,10 +869,9 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                     </span>
                   <% end %>
                 </p>
-
+                
                 <p class="mb-1 is-size-7 has-text-grey">
-                  <span class="icon"><span class="mdi mdi-chart-line"></span></span>
-                  <%= gettext(
+                  <span class="icon"><span class="mdi mdi-chart-line"></span></span> <%= gettext(
                     "TeslaLogger: %{drives} drives, %{charges} charges, %{positions} positions",
                     drives: car["drive_count"] || 0,
                     charges: car["charge_count"] || 0,
@@ -886,7 +881,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                     (<%= format_date(car["data_from"]) %> – <%= format_date(car["data_to"]) %>)
                   <% end %>
                 </p>
-
+                
                 <p class="mb-0 is-size-7">
                   <%= if car["tm_data_counts"] && map_size(car["tm_data_counts"]) > 0 do %>
                     <span class="icon-text has-text-info">
@@ -906,13 +901,13 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           </label>
         <% end %>
       <% end %>
-
-      <%!-- Manual entry toggle --%>
+       <%!-- Manual entry toggle --%>
       <label class="checkbox mt-2" style="cursor: pointer;">
-        <input type="checkbox" checked={@manual_entry} phx-click="toggle_manual_entry" />
-        <%= gettext("Manual entry (VIN / EID / VID for a car without a VIN)") %>
+        <input type="checkbox" checked={@manual_entry} phx-click="toggle_manual_entry" /> <%= gettext(
+          "Manual entry (VIN / EID / VID for a car without a VIN)"
+        ) %>
       </label>
-
+      
       <%= if @manual_entry do %>
         <div class="box mt-3 mb-0">
           <div class="field">
@@ -928,7 +923,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
               />
             </div>
           </div>
-
+          
           <div class="columns">
             <div class="column">
               <div class="field">
@@ -938,6 +933,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                     — <%= gettext("optional") %>
                   </span>
                 </label>
+                
                 <div class="control">
                   <input
                     class="input"
@@ -950,6 +946,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                 </div>
               </div>
             </div>
+            
             <div class="column">
               <div class="field">
                 <label class="label">
@@ -958,6 +955,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                     — <%= gettext("optional") %>
                   </span>
                 </label>
+                
                 <div class="control">
                   <input
                     class="input"
@@ -973,13 +971,13 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           </div>
         </div>
       <% end %>
-
+      
       <div class="is-flex is-justify-content-space-between mt-4">
         <button class="button is-light" phx-click="wizard_back">
           <span class="icon"><span class="mdi mdi-arrow-left"></span></span>
           <span><%= gettext("Back") %></span>
         </button>
-
+        
         <button
           class="button is-success"
           phx-click="wizard_next"
@@ -1016,9 +1014,10 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           <%= if @eta do %>
             <span class="has-text-grey mr-2"><%= @eta %></span>
           <% end %>
-          <span class="has-text-weight-bold"><%= @pct %>%</span>
+           <span class="has-text-weight-bold"><%= @pct %>%</span>
         </span>
       </div>
+      
       <progress class={"progress #{progress_color(@status.state)}"} value={@pct} max="100">
         <%= @pct %>%
       </progress>
@@ -1083,7 +1082,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
     <%!-- Import mode --%>
     <div class="box mb-4">
       <h3 class="title is-5"><%= gettext("Import Mode") %></h3>
-
+      
       <div class="field">
         <label
           class={"radio mb-3 #{if @status.tm_has_data, do: "has-text-grey-light"}"}
@@ -1104,7 +1103,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
             ) %>
           </p>
         </label>
-
+        
         <label
           class={"radio mb-3 #{unless @status.tm_has_data, do: "has-text-grey-light"}"}
           style="display: block;"
@@ -1124,7 +1123,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
             ) %>
           </p>
         </label>
-
+        
         <label
           class={"radio mb-3 #{unless @status.tm_has_data, do: "has-text-grey-light"}"}
           style="display: block;"
@@ -1140,8 +1139,9 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           /> <strong><%= gettext("Merge (TeslaLogger priority)") %></strong>
           <%= if @status.tm_has_data do %>
             <p class="has-text-danger ml-5">
-              <span class="icon"><span class="mdi mdi-alert"></span></span>
-              <%= gettext("Deletes overlapping TeslaMate data and replaces it with TeslaLogger data!") %>
+              <span class="icon"><span class="mdi mdi-alert"></span></span> <%= gettext(
+                "Deletes overlapping TeslaMate data and replaces it with TeslaLogger data!"
+              ) %>
             </p>
           <% else %>
             <p class="ml-5 is-size-7 has-text-grey-light">
@@ -1151,12 +1151,10 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         </label>
       </div>
     </div>
-    <%!-- Live preview --%>
+     <%!-- Live preview --%>
     <div class="box mb-4">
       <h3 class="title is-5"><%= gettext("Preview — this is what your data would look like") %></h3>
-
-      <%= legend(assigns) %>
-
+       <%= legend(assigns) %>
       <%= case @status.preview do %>
         <% p when p in [nil, :loading] -> %>
           <p class="has-text-grey">
@@ -1168,7 +1166,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           <div class="notification is-danger is-light">
             <strong><%= gettext("Preview failed:") %></strong> <%= message %>
           </div>
-
+          
           <button class="button is-info" phx-click="refresh_preview">
             <span class="icon"><span class="mdi mdi-refresh"></span></span>
             <span><%= gettext("Retry") %></span>
@@ -1178,13 +1176,13 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
             <.preview_car car={car} car_vin={@car_vin} import_mode={@import_mode} />
           <% end %>
       <% end %>
-
+      
       <div class="is-flex is-justify-content-space-between mt-4">
         <button class="button is-light" phx-click="wizard_back">
           <span class="icon"><span class="mdi mdi-arrow-left"></span></span>
           <span><%= gettext("Back") %></span>
         </button>
-
+        
         <button
           class="button is-success"
           phx-click="start_import"
@@ -1195,7 +1193,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           <span><%= gettext("Start Import") %></span>
         </button>
       </div>
-
+      
       <%= if preview_blocked?(@status.preview, @car_vin, @selected_car_ids) do %>
         <p class="is-size-7 has-text-danger mt-2">
           <%= gettext("A car has no VIN — go back and enter one manually before continuing.") %>
@@ -1214,9 +1212,11 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
       <span class="tag is-success is-light mr-2">
         <%= gettext("imported from TeslaLogger") %>
       </span>
+      
       <%= if @import_mode == "merge_tm" do %>
         <span class="tag is-info is-light mr-2"><%= gettext("kept from TeslaMate") %></span>
       <% end %>
+      
       <%= if @import_mode == "merge_tl" do %>
         <span class="tag is-danger is-light mr-2"><%= gettext("replaces TeslaMate") %></span>
       <% end %>
@@ -1231,13 +1231,13 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
       <div class="notification is-info is-light py-3 px-4 mb-3">
         <span class="icon-text is-flex-wrap-wrap">
           <span>
-            <strong><%= gettext("TL Car %{id}", id: @car.tl_car_id) %></strong>
-            <%= if @car.display_name, do: "„#{@car.display_name}”" %>
+            <strong><%= gettext("TL Car %{id}", id: @car.tl_car_id) %></strong> <%= if @car.display_name,
+              do: "„#{@car.display_name}”" %>
             <%= if vin = preview_vin(@car, @car_vin) do %>
               (VIN <code><%= vin %></code>)
             <% end %>
           </span>
-          <span class="icon"><span class="mdi mdi-arrow-right"></span></span>
+           <span class="icon"><span class="mdi mdi-arrow-right"></span></span>
           <%= cond do %>
             <% @car.tm_car_id != nil -> %>
               <span>
@@ -1249,15 +1249,16 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
               </span>
             <% true -> %>
               <span class="has-text-danger has-text-weight-medium">
-                <span class="icon"><span class="mdi mdi-alert"></span></span>
-                <%= gettext("No VIN — import would abort") %>
+                <span class="icon"><span class="mdi mdi-alert"></span></span> <%= gettext(
+                  "No VIN — import would abort"
+                ) %>
               </span>
           <% end %>
         </span>
       </div>
-      <%!-- Drives sample --%>
+       <%!-- Drives sample --%>
       <p class="has-text-weight-semibold mb-1"><%= gettext("Last drives") %></p>
-
+      
       <%= if @car.drives == [] do %>
         <p class="is-size-7 has-text-grey mb-3"><%= gettext("No drives found") %></p>
       <% else %>
@@ -1265,29 +1266,41 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           <thead>
             <tr>
               <th><%= gettext("Start (local)") %></th>
+              
               <th><%= gettext("Start (UTC)") %></th>
+              
               <th><%= gettext("Duration") %></th>
+              
               <th><%= gettext("Distance") %></th>
+              
               <th><%= gettext("Odometer") %></th>
+              
               <th>v<sub>max</sub></th>
+              
               <th></th>
             </tr>
           </thead>
-
+          
           <tbody>
             <%= for drive <- @car.drives do %>
               <tr>
                 <td><%= format_naive(drive.start_date_local) %></td>
+                
                 <td><%= format_utc(drive.start_date) %></td>
+                
                 <td><%= format_minutes(drive[:duration_min]) %></td>
+                
                 <td><%= format_km(drive[:distance]) %></td>
+                
                 <td><%= format_km(drive[:start_km]) %></td>
+                
                 <td><%= if drive[:speed_max], do: "#{drive.speed_max} km/h", else: "—" %></td>
+                
                 <td class="is-flex is-align-items-center" style="gap: 0.35rem;">
                   <%= if has_issue?(@car.issues, {:drive, drive.tl_id}) do %>
                     <span class="icon has-text-warning"><span class="mdi mdi-alert"></span></span>
                   <% end %>
-                  <% {label, cls} = disposition(@import_mode, drive[:tm_overlap]) %>
+                   <% {label, cls} = disposition(@import_mode, drive[:tm_overlap]) %>
                   <span class={cls}><%= label %></span>
                 </td>
               </tr>
@@ -1295,9 +1308,9 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           </tbody>
         </table>
       <% end %>
-      <%!-- Charges sample --%>
+       <%!-- Charges sample --%>
       <p class="has-text-weight-semibold mb-1"><%= gettext("Last charging sessions") %></p>
-
+      
       <%= if @car.charges == [] do %>
         <p class="is-size-7 has-text-grey mb-3"><%= gettext("No charging sessions found") %></p>
       <% else %>
@@ -1305,31 +1318,45 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           <thead>
             <tr>
               <th><%= gettext("Start (local)") %></th>
+              
               <th><%= gettext("Start (UTC)") %></th>
+              
               <th><%= gettext("Duration") %></th>
+              
               <th>SOC</th>
+              
               <th><%= gettext("Added") %></th>
+              
               <th><%= gettext("Used") %></th>
+              
               <th><%= gettext("Cost") %></th>
+              
               <th></th>
             </tr>
           </thead>
-
+          
           <tbody>
             <%= for cp <- @car.charges do %>
               <tr>
                 <td><%= format_naive(cp.start_date_local) %></td>
+                
                 <td><%= format_utc(cp.start_date) %></td>
+                
                 <td><%= format_minutes(cp[:duration_min]) %></td>
+                
                 <td><%= format_soc(cp[:start_battery_level], cp[:end_battery_level]) %></td>
+                
                 <td><%= format_kwh(cp[:charge_energy_added]) %></td>
+                
                 <td><%= format_kwh(cp[:charge_energy_used]) %></td>
+                
                 <td><%= format_cost(cp[:cost]) %></td>
+                
                 <td class="is-flex is-align-items-center" style="gap: 0.35rem;">
                   <%= if has_issue?(@car.issues, {:charge, cp.tl_id}) do %>
                     <span class="icon has-text-warning"><span class="mdi mdi-alert"></span></span>
                   <% end %>
-                  <% {label, cls} = disposition(@import_mode, cp[:tm_overlap]) %>
+                   <% {label, cls} = disposition(@import_mode, cp[:tm_overlap]) %>
                   <span class={cls}><%= label %></span>
                 </td>
               </tr>
@@ -1337,11 +1364,12 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           </tbody>
         </table>
       <% end %>
-      <%!-- Issues --%>
+       <%!-- Issues --%>
       <%= if @car.issues == [] do %>
         <div class="notification is-success is-light is-size-7 py-2 px-3">
-          <span class="icon"><span class="mdi mdi-check-circle"></span></span>
-          <%= gettext("No issues found in the sample") %>
+          <span class="icon"><span class="mdi mdi-check-circle"></span></span> <%= gettext(
+            "No issues found in the sample"
+          ) %>
         </div>
       <% else %>
         <%= for issue <- @car.issues do %>
@@ -1350,7 +1378,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
               <span class={"mdi #{if issue.severity == :error, do: "mdi-alert-circle", else: "mdi-alert"}"}>
               </span>
             </span>
-            <%= issue.message %>
+             <%= issue.message %>
           </div>
         <% end %>
       <% end %>
@@ -1488,6 +1516,8 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
   defp phase_label(:pending), do: ""
   defp phase_label(:reading), do: gettext("Reading MySQL…")
   defp phase_label(:mapping), do: gettext("Mapping…")
+  defp phase_label(:merging_tpms), do: gettext("Merging tire pressures…")
+  defp phase_label(:filtering_idle), do: gettext("Filtering idle positions…")
   defp phase_label(:validating), do: gettext("Validating…")
   defp phase_label(:filtering), do: gettext("Filtering overlaps…")
   defp phase_label(:deleting), do: gettext("Deleting overlaps…")
@@ -1497,6 +1527,8 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
   defp phase_color(:reading), do: "has-text-info"
   defp phase_color(:mapping), do: "has-text-info"
+  defp phase_color(:merging_tpms), do: "has-text-info"
+  defp phase_color(:filtering_idle), do: "has-text-warning"
   defp phase_color(:validating), do: "has-text-warning"
   defp phase_color(:filtering), do: "has-text-warning"
   defp phase_color(:deleting), do: "has-text-danger"

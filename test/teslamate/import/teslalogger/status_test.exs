@@ -107,6 +107,15 @@ defmodule TeslaMate.Import.TeslaLogger.StatusTest do
       assert Status.progress_fraction(start_of_inserting) == 0.5
     end
 
+    test "post-mapping phases (tpms, idle filter) hold at the mapping midpoint" do
+      base = %{Status.initial() | progress_total: 200} |> Status.start_step(:positions, 100)
+
+      for phase <- [:merging_tpms, :filtering_idle, :validating] do
+        status = base |> Status.set_phase(:positions, phase)
+        assert Status.progress_fraction(status) == 0.5, "phase #{phase} should be 0.5"
+      end
+    end
+
     test "completing a step commits its full work" do
       status =
         %{Status.initial() | progress_total: 200}

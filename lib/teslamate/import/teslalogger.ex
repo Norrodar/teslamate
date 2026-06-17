@@ -31,6 +31,9 @@ defmodule TeslaMate.Import.TeslaLogger do
   # start/end_position_id and charging_process position_id) are kept.
   @active_range_buffer_seconds 60
 
+  # How often the position mapping loop reports progress to the UI.
+  @position_progress_interval 10_000
+
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, @name))
   end
@@ -740,28 +743,35 @@ defmodule TeslaMate.Import.TeslaLogger do
           result = Mapper.map_position(row, timezone)
           new_count = count + 1
 
-          if rem(new_count, 50_000) == 0 do
+          # Tick often enough that even slow mapping shows visible movement.
+          if rem(new_count, @position_progress_interval) == 0 do
             update_status(state, &Status.update_step_progress(&1, :positions, new_count))
           end
 
           {result, new_count}
         end)
 
-      # Merge TPMS data if available
-      mapped =
+      state = update_status(state, &Status.update_step_progress(&1, :positions, length(mapped)))
+
+      # Merge TPMS data — its own phase so the UI doesn't sit on "mapping" while
+      # this runs over every position.
+      {mapped, state} =
         case MysqlReader.read_tpms(conn, tl_car_id) do
           {:ok, tpms_rows} when tpms_rows != [] ->
+            state = update_status(state, &Status.set_phase(&1, :positions, :merging_tpms))
             Logger.info("Merging #{length(tpms_rows)} TPMS readings into positions")
-            Mapper.merge_tpms(mapped, tpms_rows, timezone)
+            {Mapper.merge_tpms(mapped, tpms_rows, timezone), state}
 
           _ ->
-            mapped
+            {mapped, state}
         end
 
       # Keep only positions within drive or charging session time ranges.
       # TeslaLogger logs positions continuously (parking, sleeping) which pollutes
       # dashboards like the Speed Histogram with GPS jitter at 0 km/h.
+      state = update_status(state, &Status.set_phase(&1, :positions, :filtering_idle))
       mapped = filter_positions_to_active_ranges(mapped, conn, tl_car_id, timezone)
+      state = update_status(state, &Status.update_step_progress(&1, :positions, length(mapped)))
 
       state = update_status(state, &Status.set_phase(&1, :positions, :validating))
 

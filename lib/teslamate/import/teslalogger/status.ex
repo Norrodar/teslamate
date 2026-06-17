@@ -9,6 +9,8 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
           :pending
           | :reading
           | :mapping
+          | :merging_tpms
+          | :filtering_idle
           | :validating
           | :filtering
           | :deleting
@@ -231,11 +233,21 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
   # mapping→inserting transition doesn't make the bar jump back.
   defp live_phase_fraction(%{name: name} = step) when name in @map_insert_steps do
     case step.phase do
-      :mapping -> 0.5 * ratio(step.imported, step.total)
-      phase when phase in [:validating, :filtering, :deleting] -> 0.5
-      :inserting -> 0.5 + 0.5 * ratio(step.imported, step.total)
-      :done -> 1.0
-      _ -> 0.0
+      :mapping ->
+        0.5 * ratio(step.imported, step.total)
+
+      # All post-mapping, pre-insert phases: mapping done, inserting not started.
+      phase when phase in [:merging_tpms, :filtering_idle, :validating, :filtering, :deleting] ->
+        0.5
+
+      :inserting ->
+        0.5 + 0.5 * ratio(step.imported, step.total)
+
+      :done ->
+        1.0
+
+      _ ->
+        0.0
     end
   end
 
