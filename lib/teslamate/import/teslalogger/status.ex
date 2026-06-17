@@ -50,7 +50,10 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
           mysql_car_info: [map()],
           tm_has_data: boolean(),
           geocoding_lookups: non_neg_integer(),
-          preview: preview()
+          preview: preview(),
+          progress_total: non_neg_integer(),
+          progress_committed: non_neg_integer(),
+          started_at: DateTime.t() | nil
         }
 
   defstruct state: :idle,
@@ -63,7 +66,18 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
             mysql_car_info: [],
             tm_has_data: false,
             geocoding_lookups: 0,
-            preview: nil
+            preview: nil,
+            # Overall progress is counted in "work units": every record mapped/inserted
+            # is one unit. progress_total is the pre-counted sum over all selected cars;
+            # progress_committed accumulates monotonically as steps complete.
+            progress_total: 0,
+            progress_committed: 0,
+            started_at: nil
+
+  # Steps with a heavy mapping phase: their records count once for mapping and once
+  # for inserting, so a long mapping phase moves the bar like the user expects.
+  @map_insert_steps [:positions, :drives, :charging_processes]
+  @insert_only_steps [:charges, :states, :updates]
 
   @step_names [
     :cars,
@@ -148,16 +162,20 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
   end
 
   def complete_step(%__MODULE__{} = status, step_name, imported \\ nil) do
+    step = Enum.find(status.steps, &(&1.name == step_name))
+
     steps =
       Enum.map(status.steps, fn
-        %{name: ^step_name} = step ->
-          %{step | status: :complete, phase: :done, imported: imported || step.total}
+        %{name: ^step_name} = s ->
+          %{s | status: :complete, phase: :done, imported: imported || s.total}
 
-        step ->
-          step
+        s ->
+          s
       end)
 
-    %{status | steps: steps}
+    # Commit this step's full work to the monotonic overall counter.
+    committed = status.progress_committed + step_work(step_name, (step && step.total) || 0)
+    %{status | steps: steps, progress_committed: committed}
   end
 
   def fail_step(%__MODULE__{} = status, step_name, reason) do
@@ -173,6 +191,64 @@ defmodule TeslaMate.Import.TeslaLogger.Status do
   def set_geocoding_lookups(%__MODULE__{} = status, count) do
     %{status | geocoding_lookups: count}
   end
+
+  # Overall progress / ETA
+
+  def set_progress_total(%__MODULE__{} = status, total) do
+    %{status | progress_total: total}
+  end
+
+  def set_started_at(%__MODULE__{} = status, %DateTime{} = at) do
+    %{status | started_at: at}
+  end
+
+  @doc """
+  Work units a step contributes once finished. map+insert steps count their
+  records twice (mapping + inserting); insert-only steps once; the rest (cars,
+  geocoding, validation) carry no per-record work.
+  """
+  def step_work(name, total) when name in @map_insert_steps, do: total * 2
+  def step_work(name, total) when name in @insert_only_steps, do: total
+  def step_work(_name, _total), do: 0
+
+  @doc """
+  Overall import progress as a 0.0..1.0 fraction: committed work of finished
+  steps plus the live contribution of the running step. Monotonic.
+  """
+  def progress_fraction(%__MODULE__{progress_total: total}) when total <= 0, do: 0.0
+
+  def progress_fraction(%__MODULE__{} = status) do
+    live =
+      case Enum.find(status.steps, &(&1.status == :running)) do
+        nil -> 0.0
+        step -> step_work(step.name, step.total) * live_phase_fraction(step)
+      end
+
+    min((status.progress_committed + live) / status.progress_total, 1.0)
+  end
+
+  # Monotonic 0.0..1.0 share of a running step, aware of its phase so the
+  # mapping→inserting transition doesn't make the bar jump back.
+  defp live_phase_fraction(%{name: name} = step) when name in @map_insert_steps do
+    case step.phase do
+      :mapping -> 0.5 * ratio(step.imported, step.total)
+      phase when phase in [:validating, :filtering, :deleting] -> 0.5
+      :inserting -> 0.5 + 0.5 * ratio(step.imported, step.total)
+      :done -> 1.0
+      _ -> 0.0
+    end
+  end
+
+  defp live_phase_fraction(%{} = step) do
+    case step.phase do
+      :inserting -> ratio(step.imported, step.total)
+      :done -> 1.0
+      _ -> 0.0
+    end
+  end
+
+  defp ratio(_imported, total) when total <= 0, do: 0.0
+  defp ratio(imported, total), do: min(imported / total, 1.0)
 
   def set_preview(%__MODULE__{} = status, preview) do
     %{status | preview: preview}

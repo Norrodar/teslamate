@@ -58,4 +58,69 @@ defmodule TeslaMate.Import.TeslaLogger.StatusTest do
 
     assert length(status.warnings) == 2
   end
+
+  describe "progress_fraction/1" do
+    test "is 0 without a known total" do
+      assert Status.progress_fraction(Status.initial()) == 0.0
+    end
+
+    test "counts map+insert steps twice (mapping is half, inserting the other half)" do
+      # positions: 100 records → 200 work units of a 200 total
+      base = %{Status.initial() | progress_total: 200} |> Status.start_step(:positions, 100)
+
+      mapping =
+        base
+        |> Status.set_phase(:positions, :mapping)
+        |> Status.update_step_progress(:positions, 50)
+
+      assert Status.progress_fraction(mapping) == 0.25
+
+      mapped =
+        base
+        |> Status.set_phase(:positions, :inserting)
+        |> Status.update_step_progress(:positions, 0)
+
+      assert Status.progress_fraction(mapped) == 0.5
+
+      inserting =
+        base
+        |> Status.set_phase(:positions, :inserting)
+        |> Status.update_step_progress(:positions, 50)
+
+      assert Status.progress_fraction(inserting) == 0.75
+    end
+
+    test "is monotonic across the mapping→inserting transition" do
+      base = %{Status.initial() | progress_total: 200} |> Status.start_step(:positions, 100)
+
+      end_of_mapping =
+        base
+        |> Status.set_phase(:positions, :mapping)
+        |> Status.update_step_progress(:positions, 100)
+
+      start_of_inserting =
+        base
+        |> Status.set_phase(:positions, :inserting)
+        |> Status.update_step_progress(:positions, 0)
+
+      assert Status.progress_fraction(end_of_mapping) == 0.5
+      assert Status.progress_fraction(start_of_inserting) == 0.5
+    end
+
+    test "completing a step commits its full work" do
+      status =
+        %{Status.initial() | progress_total: 200}
+        |> Status.start_step(:positions, 100)
+        |> Status.complete_step(:positions)
+
+      assert status.progress_committed == 200
+      assert Status.progress_fraction(status) == 1.0
+    end
+
+    test "insert-only steps count their records once" do
+      assert Status.step_work(:states, 100) == 100
+      assert Status.step_work(:positions, 100) == 200
+      assert Status.step_work(:cars, 100) == 0
+    end
+  end
 end

@@ -277,7 +277,7 @@ defmodule TeslaMate.Import.TeslaLogger do
                 update_status(state, &Status.set_state(&1, {:error, reason}))
 
               {:ok, state} ->
-                state = import_all_car_data(state)
+                state = state |> count_total_work() |> import_all_car_data()
 
                 if match?({:error, _}, state.status.state) do
                   state
@@ -287,6 +287,37 @@ defmodule TeslaMate.Import.TeslaLogger do
             end
         end
     end
+  end
+
+  # Pre-counts every selected car's records so the overall progress bar and ETA
+  # are stable from the start. COUNT(*) queries are cheap even on huge tables.
+  defp count_total_work(state) do
+    conn = state.mysql_conn
+
+    total =
+      Enum.reduce(state.car_mapping, 0, fn {tl_car_id, _car}, acc ->
+        acc + car_work_units(conn, tl_car_id)
+      end)
+
+    state
+    |> update_status(&Status.set_progress_total(&1, total))
+    |> update_status(&Status.set_started_at(&1, DateTime.utc_now()))
+  end
+
+  defp car_work_units(conn, tl_car_id) do
+    count = fn fun ->
+      case fun.(conn, tl_car_id) do
+        {:ok, n} -> n
+        _ -> 0
+      end
+    end
+
+    Status.step_work(:positions, count.(&MysqlReader.count_positions/2)) +
+      Status.step_work(:drives, count.(&MysqlReader.count_drives/2)) +
+      Status.step_work(:charging_processes, count.(&MysqlReader.count_charging_sessions/2)) +
+      Status.step_work(:charges, count.(&MysqlReader.count_charges/2)) +
+      Status.step_work(:states, count.(&MysqlReader.count_states/2)) +
+      Status.step_work(:updates, count.(&MysqlReader.count_updates/2))
   end
 
   defp ensure_connected(state) do

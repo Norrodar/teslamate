@@ -686,26 +686,44 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
     <% end %>
 
     <%= if @status.state == :complete do %>
-      <div class="notification is-success">
-        <p class="mb-2"><strong>Import complete!</strong></p>
+      <div class="notification is-success is-light">
+        <p class="mb-2"><strong><%= gettext("Import complete!") %></strong></p>
 
         <%= if @status.geocoding_lookups > 0 do %>
           <p class="mb-2">
             <span class="icon"><span class="mdi mdi-map-marker-multiple"></span></span>
-            <strong><%= format_number(@status.geocoding_lookups) %></strong>
-            addresses need reverse geocoding via Nominatim
-            (rate limit: 1 request per ~2 seconds). <br />
-            Estimated time: <strong><%= format_geocoding_duration(@status.geocoding_lookups) %></strong>.
-            This runs automatically in the background.
+            <%= raw(
+              gettext(
+                "<strong>%{count}</strong> addresses need reverse geocoding via Nominatim (rate limit: ~1 request per 2 seconds).",
+                count: format_number(@status.geocoding_lookups)
+              )
+            ) %>
+            <br />
+            <%= gettext("Estimated time:") %>
+            <strong><%= format_duration(@status.geocoding_lookups * 2) %></strong>
+            (<%= gettext("done around") %>
+            <strong>
+              <span
+                id="geocoding-eta"
+                phx-hook="LocalTime"
+                data-date={geocoding_finish_iso(@status.geocoding_lookups)}
+              >
+              </span>
+            </strong>). <%= gettext(
+              "This runs automatically in the background."
+            ) %>
           </p>
 
-          <p class="is-size-7 has-text-success-dark">
-            Until geocoding is complete, some Grafana dashboards may show coordinates instead of
-            addresses, and geofence filters may not match all entries.
+          <p class="is-size-7">
+            <%= gettext(
+              "Until geocoding is complete, some Grafana dashboards may show coordinates instead of addresses, and geofence filters may not match all entries."
+            ) %>
           </p>
         <% else %>
           <p>
-            All addresses already resolved. Check the Grafana dashboards to verify the imported data.
+            <%= gettext(
+              "All addresses already resolved. Check the Grafana dashboards to verify the imported data."
+            ) %>
           </p>
         <% end %>
       </div>
@@ -981,31 +999,25 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
   ## Step 5: weighted progress bar
 
-  # Rough share of total work per step; positions dominate, so their sub-progress
-  # moves the bar smoothly across the bulk of the import.
-  @step_weights %{
-    cars: 2,
-    positions: 50,
-    drives: 14,
-    charging_processes: 10,
-    charges: 8,
-    states: 4,
-    updates: 2,
-    geocoding: 5,
-    validation: 5
-  }
-
   defp progress_bar(assigns) do
+    pct = round(Status.progress_fraction(assigns.status) * 100)
+
     assigns =
       assigns
-      |> assign(:pct, overall_progress(assigns.status.steps))
+      |> assign(:pct, pct)
       |> assign(:phase, current_phase_label(assigns.status))
+      |> assign(:eta, eta_label(assigns.status))
 
     ~H"""
     <div class="mb-4">
       <div class="is-flex is-justify-content-space-between mb-1">
         <span class="is-size-7 has-text-grey"><%= @phase %></span>
-        <span class="is-size-7 has-text-weight-bold"><%= @pct %>%</span>
+        <span class="is-size-7">
+          <%= if @eta do %>
+            <span class="has-text-grey mr-2"><%= @eta %></span>
+          <% end %>
+          <span class="has-text-weight-bold"><%= @pct %>%</span>
+        </span>
       </div>
       <progress class={"progress #{progress_color(@status.state)}"} value={@pct} max="100">
         <%= @pct %>%
@@ -1014,25 +1026,30 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
     """
   end
 
-  defp overall_progress(steps) do
-    total_weight = @step_weights |> Map.values() |> Enum.sum()
+  # Estimated time remaining from the measured rate so far. Nil until there is
+  # enough progress for a meaningful estimate.
+  defp eta_label(%Status{state: :running, started_at: %DateTime{} = started} = status) do
+    p = Status.progress_fraction(status)
 
-    done =
-      Enum.reduce(steps, 0.0, fn step, acc ->
-        weight = Map.get(@step_weights, step.name, 0)
-        acc + weight * step_fraction(step)
-      end)
-
-    round(done / total_weight * 100)
+    if p > 0.02 and p < 1.0 do
+      elapsed = DateTime.diff(DateTime.utc_now(), started)
+      remaining = round(elapsed * (1 - p) / p)
+      gettext("approx. %{duration} left", duration: format_duration(remaining))
+    end
   end
 
-  defp step_fraction(%{status: :complete}), do: 1.0
+  defp eta_label(_status), do: nil
 
-  defp step_fraction(%{status: status, total: total, imported: imported})
-       when status == :running and total > 0,
-       do: min(imported / total, 1.0)
+  defp format_duration(seconds) when seconds < 60, do: gettext("< 1 min")
 
-  defp step_fraction(_), do: 0.0
+  defp format_duration(seconds) when seconds < 3600 do
+    gettext("%{count} min", count: max(round(seconds / 60), 1))
+  end
+
+  defp format_duration(seconds) do
+    hours = Float.round(seconds / 3600, 1)
+    gettext("%{count} h", count: hours)
+  end
 
   defp progress_color(:complete), do: "is-success"
   defp progress_color({:error, _}), do: "is-danger"
@@ -1507,33 +1524,12 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
   defp format_number(n), do: to_string(n)
 
-  # Estimate: ~2 seconds per lookup (1.5s sleep + network)
-  defp format_geocoding_duration(lookups) when lookups <= 0, do: "—"
-
-  defp format_geocoding_duration(lookups) do
-    total_seconds = lookups * 2
-    total_minutes = ceil(total_seconds / 60)
-
-    cond do
-      total_minutes < 60 ->
-        if total_minutes == 1, do: "~1 minute", else: "~#{total_minutes} minutes"
-
-      true ->
-        hours = total_seconds / 3600
-        # Round up to nearest 0.5 hours
-        rounded_hours = Float.ceil(hours * 2) / 2
-
-        cond do
-          rounded_hours == 1.0 ->
-            "~1 hour"
-
-          rounded_hours == Float.floor(rounded_hours) ->
-            "~#{round(rounded_hours)} hours"
-
-          true ->
-            "~#{:erlang.float_to_binary(rounded_hours, decimals: 1)} hours"
-        end
-    end
+  # UTC timestamp (~2 s per Nominatim lookup) for the LocalTime hook to render in
+  # the browser's local time.
+  defp geocoding_finish_iso(lookups) do
+    DateTime.utc_now()
+    |> DateTime.add(lookups * 2, :second)
+    |> DateTime.to_iso8601()
   end
 
   # Warning grouping and display helpers
