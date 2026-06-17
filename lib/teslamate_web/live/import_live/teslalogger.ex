@@ -1191,7 +1191,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
         <%= gettext("imported from TeslaLogger") %>
       </span>
       <%= if @import_mode == "merge_tm" do %>
-        <span class="tag is-light mr-2"><%= gettext("kept from TeslaMate") %></span>
+        <span class="tag is-info is-light mr-2"><%= gettext("kept from TeslaMate") %></span>
       <% end %>
       <%= if @import_mode == "merge_tl" do %>
         <span class="tag is-danger is-light mr-2"><%= gettext("replaces TeslaMate") %></span>
@@ -1252,14 +1252,17 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
           <tbody>
             <%= for drive <- @car.drives do %>
-              <tr class={preview_row_class(@car.issues, {:drive, drive.tl_id})}>
+              <tr>
                 <td><%= format_naive(drive.start_date_local) %></td>
                 <td><%= format_utc(drive.start_date) %></td>
                 <td><%= format_minutes(drive[:duration_min]) %></td>
                 <td><%= format_km(drive[:distance]) %></td>
                 <td><%= format_km(drive[:start_km]) %></td>
                 <td><%= if drive[:speed_max], do: "#{drive.speed_max} km/h", else: "—" %></td>
-                <td>
+                <td class="is-flex is-align-items-center" style="gap: 0.35rem;">
+                  <%= if has_issue?(@car.issues, {:drive, drive.tl_id}) do %>
+                    <span class="icon has-text-warning"><span class="mdi mdi-alert"></span></span>
+                  <% end %>
                   <% {label, cls} = disposition(@import_mode, drive[:tm_overlap]) %>
                   <span class={cls}><%= label %></span>
                 </td>
@@ -1290,7 +1293,7 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
           <tbody>
             <%= for cp <- @car.charges do %>
-              <tr class={preview_row_class(@car.issues, {:charge, cp.tl_id})}>
+              <tr>
                 <td><%= format_naive(cp.start_date_local) %></td>
                 <td><%= format_utc(cp.start_date) %></td>
                 <td><%= format_minutes(cp[:duration_min]) %></td>
@@ -1298,7 +1301,10 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
                 <td><%= format_kwh(cp[:charge_energy_added]) %></td>
                 <td><%= format_kwh(cp[:charge_energy_used]) %></td>
                 <td><%= format_cost(cp[:cost]) %></td>
-                <td>
+                <td class="is-flex is-align-items-center" style="gap: 0.35rem;">
+                  <%= if has_issue?(@car.issues, {:charge, cp.tl_id}) do %>
+                    <span class="icon has-text-warning"><span class="mdi mdi-alert"></span></span>
+                  <% end %>
                   <% {label, cls} = disposition(@import_mode, cp[:tm_overlap]) %>
                   <span class={cls}><%= label %></span>
                 </td>
@@ -1309,20 +1315,19 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
       <% end %>
       <%!-- Issues --%>
       <%= if @car.issues == [] do %>
-        <p class="is-size-7 has-text-success">
-          <span class="icon"><span class="mdi mdi-check-circle"></span></span> <%= gettext(
-            "No issues found in the sample"
-          ) %>
-        </p>
+        <div class="notification is-success is-light is-size-7 py-2 px-3">
+          <span class="icon"><span class="mdi mdi-check-circle"></span></span>
+          <%= gettext("No issues found in the sample") %>
+        </div>
       <% else %>
         <%= for issue <- @car.issues do %>
-          <p class={"is-size-7 #{if issue.severity == :error, do: "has-text-danger", else: "has-text-warning-dark"}"}>
+          <div class={"notification is-size-7 py-2 px-3 mb-2 #{if issue.severity == :error, do: "is-danger is-light", else: "is-warning is-light"}"}>
             <span class="icon is-small">
               <span class={"mdi #{if issue.severity == :error, do: "mdi-alert-circle", else: "mdi-alert"}"}>
               </span>
             </span>
             <%= issue.message %>
-          </p>
+          </div>
         <% end %>
       <% end %>
     </div>
@@ -1331,14 +1336,10 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
 
   # Issue rows get a warning background; force dark text so it reads on the yellow
   # tint in both light and dark themes.
-  defp preview_row_class(issues, ref) do
-    if has_issue?(issues, ref), do: "has-background-warning-light has-text-grey-dark", else: ""
-  end
-
   # Per-row disposition label/class driven live by the selected mode and TM overlap.
   defp disposition(mode, tm_overlap) do
     case {mode, tm_overlap} do
-      {"merge_tm", true} -> {gettext("kept (TM)"), "tag is-light"}
+      {"merge_tm", true} -> {gettext("kept (TM)"), "tag is-info is-light"}
       {"merge_tl", true} -> {gettext("replaces TM"), "tag is-danger is-light"}
       _ -> {gettext("import (TL)"), "tag is-success is-light"}
     end
