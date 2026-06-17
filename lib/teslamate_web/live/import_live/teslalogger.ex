@@ -609,7 +609,14 @@ defmodule TeslaMateWeb.ImportLive.TeslaLogger do
           </p>
         <% end %>
 
-        <table class="table is-fullwidth is-hoverable">
+        <table class="table is-fullwidth is-hoverable" style="table-layout: fixed;">
+          <colgroup>
+            <col style="width: 22%;" />
+            <col style="width: 10%;" />
+            <col style="width: 28%;" />
+            <col style="width: 22%;" />
+            <col style="width: 18%;" />
+          </colgroup>
           <thead>
             <tr>
               <th><%= gettext("Step") %></th>
