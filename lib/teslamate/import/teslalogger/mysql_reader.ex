@@ -119,9 +119,26 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
 
   @doc "Reads all cars from TeslaLogger."
   def read_cars(conn) do
-    case MyXQL.query(conn, "SELECT id, vin, display_name, tasker_hash, model_name FROM cars") do
+    query = """
+    SELECT id, vin, display_name, tasker_hash, model_name,
+           car_type, car_trim_badging, wheel_type, wh_tr, db_wh_tr, db_wh_tr_count
+    FROM cars
+    """
+
+    case MyXQL.query(conn, query) do
       {:ok, %MyXQL.Result{rows: rows, columns: columns}} ->
         {:ok, rows_to_maps(columns, rows)}
+
+      # Unknown column (1054): older TeslaLogger schema without the enrichment
+      # columns — fall back to the minimal set.
+      {:error, %MyXQL.Error{mysql: %{code: 1054}}} ->
+        case MyXQL.query(conn, "SELECT id, vin, display_name, tasker_hash, model_name FROM cars") do
+          {:ok, %MyXQL.Result{rows: rows, columns: columns}} ->
+            {:ok, rows_to_maps(columns, rows)}
+
+          {:error, _} = err ->
+            err
+        end
 
       {:error, _} = err ->
         err
@@ -147,14 +164,25 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     count_query(conn, "SELECT COUNT(*) FROM pos WHERE CarID = ?", [car_id])
   end
 
-  @doc "Reads drives for a given car, ordered by start date."
+  @doc """
+  Reads drives for a given car, ordered by start date.
+
+  Joins the boundary positions: TeslaLogger's drivestate.EndDate is unreliable
+  (in real databases >60% of rows deviate more than 30s from the actual last
+  position, including EndDate < StartDate), while StartPos/EndPos always point
+  at the true first/last position of the drive. The mapper prefers the joined
+  pos timestamps over StartDate/EndDate.
+  """
   def read_drives(conn, car_id) do
     query = """
-    SELECT id, StartDate, EndDate, StartPos, EndPos,
-           outside_temp_avg, speed_max, power_max, power_min
-    FROM drivestate
-    WHERE CarID = ?
-    ORDER BY StartDate ASC
+    SELECT d.id, d.StartDate, d.EndDate, d.StartPos, d.EndPos,
+           d.outside_temp_avg, d.speed_max, d.power_max, d.power_min,
+           ps.Datum AS StartPosDatum, pe.Datum AS EndPosDatum
+    FROM drivestate d
+    LEFT JOIN pos ps ON ps.id = d.StartPos
+    LEFT JOIN pos pe ON pe.id = d.EndPos
+    WHERE d.CarID = ?
+    ORDER BY d.StartDate ASC
     """
 
     fetch_all(conn, query, [car_id])
@@ -168,11 +196,14 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
   @doc "Reads the N most recent drives for a car, newest first. Same columns as read_drives."
   def read_recent_drives(conn, car_id, limit) do
     query = """
-    SELECT id, StartDate, EndDate, StartPos, EndPos,
-           outside_temp_avg, speed_max, power_max, power_min
-    FROM drivestate
-    WHERE CarID = ?
-    ORDER BY StartDate DESC
+    SELECT d.id, d.StartDate, d.EndDate, d.StartPos, d.EndPos,
+           d.outside_temp_avg, d.speed_max, d.power_max, d.power_min,
+           ps.Datum AS StartPosDatum, pe.Datum AS EndPosDatum
+    FROM drivestate d
+    LEFT JOIN pos ps ON ps.id = d.StartPos
+    LEFT JOIN pos pe ON pe.id = d.EndPos
+    WHERE d.CarID = ?
+    ORDER BY d.StartDate DESC
     LIMIT #{limit}
     """
 
@@ -234,42 +265,53 @@ defmodule TeslaMate.Import.TeslaLogger.MysqlReader do
     count_query(conn, "SELECT COUNT(*) FROM charging WHERE CarID = ?", [car_id])
   end
 
-  @doc "Reads charging sessions for a given car, ordered by start date."
-  def read_charging_sessions(conn, car_id) do
-    query = """
-    SELECT id, StartDate, EndDate, charge_energy_added, cost_total,
-           cost_per_kwh, cost_per_session, cost_per_minute,
-           fast_charger_brand, fast_charger_type,
-           conn_charge_cable, max_charger_power,
-           cost_kwh_meter_invoice
-    FROM chargingstate
-    WHERE CarID = ?
-    ORDER BY StartDate ASC
-    """
+  # TeslaLogger's session-combining feature marks merged-away sessions as
+  # hidden = 1 (the surviving session covers the full time range). Importing
+  # hidden sessions would double-count energy. Older TL schemas have no
+  # `hidden` column (error 1054) — fall back to unfiltered queries there.
+  @cs_columns """
+  id, StartDate, EndDate, Pos, charge_energy_added, cost_total,
+  cost_per_kwh, cost_per_session, cost_per_minute,
+  fast_charger_brand, fast_charger_type,
+  conn_charge_cable, max_charger_power,
+  cost_kwh_meter_invoice
+  """
 
-    fetch_all(conn, query, [car_id])
+  @doc "Reads charging sessions for a given car, ordered by start date. Skips hidden (combined) sessions."
+  def read_charging_sessions(conn, car_id) do
+    with_hidden_fallback(fn where ->
+      fetch_all(
+        conn,
+        "SELECT #{@cs_columns} FROM chargingstate WHERE CarID = ? #{where} ORDER BY StartDate ASC",
+        [car_id]
+      )
+    end)
   end
 
-  @doc "Counts charging sessions for a given car."
+  @doc "Counts charging sessions for a given car (excluding hidden ones)."
   def count_charging_sessions(conn, car_id) do
-    count_query(conn, "SELECT COUNT(*) FROM chargingstate WHERE CarID = ?", [car_id])
+    with_hidden_fallback(fn where ->
+      count_query(conn, "SELECT COUNT(*) FROM chargingstate WHERE CarID = ? #{where}", [car_id])
+    end)
   end
 
   @doc "Reads the N most recent charging sessions, newest first. Same columns as read_charging_sessions."
   def read_recent_charging_sessions(conn, car_id, limit) do
-    query = """
-    SELECT id, StartDate, EndDate, charge_energy_added, cost_total,
-           cost_per_kwh, cost_per_session, cost_per_minute,
-           fast_charger_brand, fast_charger_type,
-           conn_charge_cable, max_charger_power,
-           cost_kwh_meter_invoice
-    FROM chargingstate
-    WHERE CarID = ?
-    ORDER BY StartDate DESC
-    LIMIT #{limit}
-    """
+    with_hidden_fallback(fn where ->
+      fetch_all(
+        conn,
+        "SELECT #{@cs_columns} FROM chargingstate WHERE CarID = ? #{where} " <>
+          "ORDER BY StartDate DESC LIMIT #{limit}",
+        [car_id]
+      )
+    end)
+  end
 
-    fetch_all(conn, query, [car_id])
+  defp with_hidden_fallback(query_fn) do
+    case query_fn.("AND hidden = 0") do
+      {:error, %MyXQL.Error{mysql: %{code: 1054}}} -> query_fn.("")
+      other -> other
+    end
   end
 
   @doc """

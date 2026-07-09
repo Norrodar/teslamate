@@ -199,6 +199,7 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
         car_id,
         processes_with_tl_ids,
         date_to_pos_id,
+        session_pos_dates \\ %{},
         progress_fn \\ fn _, _ -> :ok end
       ) do
     total = length(processes_with_tl_ids)
@@ -210,18 +211,29 @@ defmodule TeslaMate.Import.TeslaLogger.Writer do
       fn ->
         {result, _count} =
           Enum.map_reduce(processes_with_tl_ids, 0, fn {tl_id, cp_attrs}, count ->
-            # Positions for charging sessions are imported with a ±60s buffer, so a
-            # match within 15 minutes is generous; anything further would attach the
-            # wrong address/geofence. position_id is NOT NULL, so sessions without a
-            # nearby position must be skipped instead of inserted.
-            position_id =
-              if cp_attrs.start_date do
-                find_nearest(
-                  pos_sorted_array,
-                  DateTime.to_unix(cp_attrs.start_date, :second),
-                  900
-                )
+            # Preferred: the exact charging location from chargingstate.Pos
+            # (imported alongside the positions, so an exact-date match exists).
+            # Fallback: nearest position within 15 minutes of start_date — anything
+            # further would attach the wrong address/geofence. position_id is
+            # NOT NULL, so sessions without any match must be skipped.
+            exact_position_id =
+              case Map.get(session_pos_dates, tl_id) do
+                %DateTime{} = dt ->
+                  find_nearest(pos_sorted_array, DateTime.to_unix(dt, :second), 5)
+
+                _ ->
+                  nil
               end
+
+            position_id =
+              exact_position_id ||
+                if cp_attrs.start_date do
+                  find_nearest(
+                    pos_sorted_array,
+                    DateTime.to_unix(cp_attrs.start_date, :second),
+                    900
+                  )
+                end
 
             item =
               if is_nil(position_id) do

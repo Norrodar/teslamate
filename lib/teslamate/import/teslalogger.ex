@@ -771,6 +771,13 @@ defmodule TeslaMate.Import.TeslaLogger do
       # dashboards like the Speed Histogram with GPS jitter at 0 km/h.
       state = update_status(state, &Status.set_phase(&1, :positions, :filtering_idle))
       mapped = filter_positions_to_active_ranges(mapped, conn, tl_car_id, timezone)
+
+      # Re-add the charging-location positions (chargingstate.Pos). TeslaLogger
+      # often logs no pos rows during a charging session (car parked), so the
+      # idle filter would leave sessions without any nearby position — and
+      # charging_processes.position_id is NOT NULL, forcing those sessions to
+      # be skipped entirely.
+      mapped = ensure_session_positions(mapped, conn, tl_car_id, timezone)
       state = update_status(state, &Status.update_step_progress(&1, :positions, length(mapped)))
 
       state = update_status(state, &Status.set_phase(&1, :positions, :validating))
@@ -868,6 +875,7 @@ defmodule TeslaMate.Import.TeslaLogger do
         end)
 
       mapped = filter_phantom_drives(mapped)
+      mapped = dedup_overlapping_drives(mapped)
 
       state = update_status(state, &Status.set_phase(&1, :drives, :validating))
 
@@ -996,11 +1004,16 @@ defmodule TeslaMate.Import.TeslaLogger do
         update_status(state, &Status.update_step_progress(&1, :charging_processes, inserted))
       end
 
+      # Exact charging locations: chargingstate.Pos → pos.Datum (UTC). The writer
+      # prefers this over the nearest-to-start_date heuristic.
+      session_pos_dates = session_position_dates(conn, cp_rows, timezone)
+
       {tl_cs_id_to_cp_id, state} =
         case Writer.insert_charging_processes(
                car_id,
                valid_cps_with_tl_ids,
                state.date_to_pos_id,
+               session_pos_dates,
                cp_progress
              ) do
           {:ok, mapping} ->
@@ -1215,6 +1228,63 @@ defmodule TeslaMate.Import.TeslaLogger do
     end
   end
 
+  # Builds %{tl_chargingstate_id => charging-location UTC datetime} from
+  # chargingstate.Pos. Sessions without Pos (or unreadable pos rows) are absent.
+  defp session_position_dates(conn, cp_rows, timezone) do
+    cs_to_pos =
+      cp_rows
+      |> Enum.map(&{&1["id"], &1["Pos"]})
+      |> Enum.reject(fn {_cs, pos} -> is_nil(pos) end)
+
+    case MysqlReader.read_positions_by_ids(conn, Enum.map(cs_to_pos, &elem(&1, 1))) do
+      {:ok, pos_rows} ->
+        date_by_pos_id =
+          Map.new(pos_rows, fn row -> {row["id"], Mapper.map_position(row, timezone).date} end)
+
+        cs_to_pos
+        |> Enum.map(fn {cs_id, pos_id} -> {cs_id, Map.get(date_by_pos_id, pos_id)} end)
+        |> Enum.reject(fn {_cs, date} -> is_nil(date) end)
+        |> Map.new()
+
+      {:error, _} ->
+        %{}
+    end
+  end
+
+  # Fetches the charging-location positions (chargingstate.Pos → pos) and merges
+  # them into the mapped position list (skipping timestamps already present).
+  defp ensure_session_positions(positions, conn, tl_car_id, timezone) do
+    with {:ok, cp_rows} <- MysqlReader.read_charging_sessions(conn, tl_car_id),
+         pos_ids = cp_rows |> Enum.map(& &1["Pos"]) |> Enum.reject(&is_nil/1) |> Enum.uniq(),
+         {:ok, pos_rows} <- MysqlReader.read_positions_by_ids(conn, pos_ids) do
+      existing =
+        positions
+        |> Enum.reject(&is_nil(&1.date))
+        |> MapSet.new(&DateTime.to_unix(&1.date, :second))
+
+      extra =
+        pos_rows
+        |> Enum.map(&Mapper.map_position(&1, timezone))
+        |> Enum.reject(fn p ->
+          is_nil(p.date) or MapSet.member?(existing, DateTime.to_unix(p.date, :second))
+        end)
+
+      if extra == [] do
+        positions
+      else
+        Logger.info("Added #{length(extra)} charging-location positions (chargingstate.Pos)")
+        Enum.sort_by(positions ++ extra, &DateTime.to_unix(&1.date, :second))
+      end
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "Could not read charging-location positions (#{inspect(reason)}) — continuing without"
+        )
+
+        positions
+    end
+  end
+
   # Mode B: rejects positions that fall within existing TeslaMate drive/charge
   # ranges or match an existing position timestamp exactly.
   defp filter_positions_against_tm_ranges(positions, car_id) do
@@ -1327,11 +1397,61 @@ defmodule TeslaMate.Import.TeslaLogger do
     kept
   end
 
+  # TeslaLogger occasionally records duplicate drivestate rows for the same trip
+  # (restart/retry artifacts, often sharing the same EndPos). With position-based
+  # boundaries these become overlapping ranges and would double-count distance in
+  # TeslaMate statistics. When two drives overlap, keep the one covering the
+  # larger distance (fallback: longer duration).
+  defp dedup_overlapping_drives(drives) do
+    {kept, dropped} =
+      drives
+      |> Enum.sort_by(&DateTime.to_unix(&1.start_date, :second))
+      |> Enum.reduce({[], 0}, fn drive, {acc, dropped} ->
+        case acc do
+          [prev | rest] ->
+            if drives_overlap?(prev, drive) do
+              {[pick_better_drive(prev, drive) | rest], dropped + 1}
+            else
+              {[drive | acc], dropped}
+            end
+
+          [] ->
+            {[drive], dropped}
+        end
+      end)
+
+    if dropped > 0 do
+      Logger.info("Deduplicated #{dropped} overlapping drives (TeslaLogger duplicates)")
+    end
+
+    Enum.reverse(kept)
+  end
+
+  defp drives_overlap?(%{end_date: nil}, _next), do: false
+
+  defp drives_overlap?(prev, next) do
+    DateTime.compare(next.start_date, prev.end_date) == :lt
+  end
+
+  defp pick_better_drive(a, b) do
+    dist_a = a[:distance] || 0
+    dist_b = b[:distance] || 0
+
+    cond do
+      dist_a > dist_b -> a
+      dist_b > dist_a -> b
+      (a[:duration_min] || 0) >= (b[:duration_min] || 0) -> a
+      true -> b
+    end
+  end
+
   # Recalculate efficiency factor for each imported car from charging data.
   # Same logic as TeslaMate's Log.recalculate_efficiency:
   # efficiency = charge_energy_added / (end_rated_range_km - start_rated_range_km)
   defp recalculate_car_efficiencies(state) do
-    Enum.each(state.car_mapping, fn {_tl_id, car} ->
+    tl_efficiencies = read_tl_efficiencies(state.mysql_conn)
+
+    Enum.each(state.car_mapping, fn {tl_id, car} ->
       query =
         from cp in ChargingProcess,
           select: {
@@ -1367,9 +1487,45 @@ defmodule TeslaMate.Import.TeslaLogger do
           end
 
         _ ->
-          Logger.warning("Car #{car.id}: could not derive efficiency — not enough charging data")
+          apply_tl_efficiency_fallback(car, Map.get(tl_efficiencies, tl_id))
       end
     end)
+  end
+
+  # TeslaLogger maintains its own consumption factor per car (kWh/km): db_wh_tr is
+  # derived from logged charges, wh_tr is the static model default. Used when not
+  # enough charging data was imported to derive efficiency the TeslaMate way.
+  defp read_tl_efficiencies(conn) do
+    case MysqlReader.read_cars(conn) do
+      {:ok, tl_cars} ->
+        Map.new(tl_cars, fn c -> {c["id"], c["db_wh_tr"] || c["wh_tr"]} end)
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp apply_tl_efficiency_fallback(car, factor) when is_number(factor) do
+    factor = factor / 1
+
+    if factor > 0.05 and factor < 0.5 do
+      Logger.info(
+        "Car #{car.id}: using TeslaLogger consumption factor #{Float.round(factor * 1000, 1)} Wh/km as efficiency fallback"
+      )
+
+      Car
+      |> Repo.get!(car.id)
+      |> Car.changeset(%{efficiency: factor})
+      |> Repo.update!()
+    else
+      Logger.warning(
+        "Car #{car.id}: TeslaLogger consumption factor #{factor} implausible — skipped"
+      )
+    end
+  end
+
+  defp apply_tl_efficiency_fallback(car, _factor) do
+    Logger.warning("Car #{car.id}: could not derive efficiency — not enough charging data")
   end
 
   # Counts pending Nominatim lookups for the imported cars (1 per missing address).
@@ -1540,17 +1696,35 @@ defmodule TeslaMate.Import.TeslaLogger do
             {:ok, Repo.preload(car, :settings)}
 
           nil ->
-            create_import_car(eid, vid, vin, display_name)
+            create_import_car(eid, vid, vin, display_name, tl_car)
         end
     end
   end
 
-  defp create_import_car(eid, vid, vin, name) do
+  # TeslaLogger car_type → TeslaMate model letter
+  defp map_tl_model(car_type) when is_binary(car_type) do
+    case String.downcase(car_type) do
+      "model3" -> "3"
+      "models" <> _ -> "S"
+      "modelx" -> "X"
+      "modely" -> "Y"
+      _ -> nil
+    end
+  end
+
+  defp map_tl_model(_), do: nil
+
+  defp create_import_car(eid, vid, vin, name, tl_car) do
+    trim = tl_car["car_trim_badging"]
+
     attrs = %{
       eid: eid,
       vid: vid,
       vin: vin,
-      name: name
+      name: name,
+      model: map_tl_model(tl_car["car_type"]),
+      trim_badging: if(trim not in [nil, ""], do: String.upcase(trim)),
+      wheel_type: tl_car["wheel_type"]
     }
 
     case Log.create_car(attrs) do

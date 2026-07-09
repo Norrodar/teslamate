@@ -110,6 +110,80 @@ defmodule TeslaMate.Import.TeslaLogger.MapperTest do
       assert result.power_max == 80
       assert result.power_min == -50
     end
+
+    test "prefers boundary-position timestamps over StartDate/EndDate" do
+      # Real TeslaLogger data: EndDate is often minutes off (or before StartDate),
+      # while StartPos/EndPos point at the true first/last position.
+      row = %{
+        "StartDate" => ~N[2023-06-15 14:03:22],
+        "EndDate" => ~N[2023-06-15 13:59:42],
+        "StartPosDatum" => ~N[2023-06-15 14:03:21],
+        "EndPosDatum" => ~N[2023-06-15 14:05:54]
+      }
+
+      result = Mapper.map_drive(row, @timezone)
+
+      assert result.start_date.minute == 3
+      assert result.end_date.minute == 5
+      assert DateTime.compare(result.start_date, result.end_date) == :lt
+    end
+
+    test "falls back to StartDate/EndDate when pos timestamps are missing" do
+      row = %{
+        "StartDate" => ~N[2023-06-15 14:00:00],
+        "EndDate" => ~N[2023-06-15 14:45:00],
+        "StartPosDatum" => nil,
+        "EndPosDatum" => nil
+      }
+
+      result = Mapper.map_drive(row, @timezone)
+
+      assert result.start_date.hour == 12
+      assert DateTime.diff(result.end_date, result.start_date, :minute) == 45
+    end
+  end
+
+  describe "enrich_charging_process/2" do
+    test "clamps charge_energy_used to at least charge_energy_added" do
+      # Sparse charge rows make the power integration undercount grid energy;
+      # used < added would render as >100% charging efficiency in Grafana.
+      cp = %{
+        start_date: ~U[2023-06-15 12:00:00Z],
+        end_date: ~U[2023-06-15 13:00:00Z],
+        charge_energy_added: Decimal.new(30),
+        meter_energy_used: nil
+      }
+
+      charges = [
+        %{
+          date: ~U[2023-06-15 12:00:00Z],
+          battery_level: 40,
+          ideal_battery_range_km: Decimal.new(200),
+          rated_battery_range_km: Decimal.new(200),
+          outside_temp: nil,
+          charger_power: 11,
+          charger_actual_current: 16,
+          charger_voltage: 230,
+          charger_phases: 3
+        },
+        %{
+          date: ~U[2023-06-15 12:01:00Z],
+          battery_level: 41,
+          ideal_battery_range_km: Decimal.new(205),
+          rated_battery_range_km: Decimal.new(205),
+          outside_temp: nil,
+          charger_power: 11,
+          charger_actual_current: 16,
+          charger_voltage: 230,
+          charger_phases: 3
+        }
+      ]
+
+      result = Mapper.enrich_charging_process(cp, charges)
+
+      # Integration over 1 minute yields ~0.18 kWh — far below added (30 kWh)
+      assert Decimal.compare(result.charge_energy_used, Decimal.new(30)) != :lt
+    end
   end
 
   describe "enrich_drive/2" do

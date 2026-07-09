@@ -87,10 +87,16 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
   defp datetime_to_unix(%DateTime{} = dt), do: DateTime.to_unix(dt, :second)
   defp datetime_to_unix(_), do: nil
 
-  @doc "Maps a TeslaLogger drivestate row to TeslaMate drive attrs."
+  @doc """
+  Maps a TeslaLogger drivestate row to TeslaMate drive attrs.
+
+  Prefers the joined boundary-position timestamps (StartPosDatum/EndPosDatum)
+  over StartDate/EndDate: TeslaLogger's EndDate is frequently minutes off or
+  even before StartDate, which would truncate or drop real drives.
+  """
   def map_drive(row, timezone) do
-    start_date = to_utc(row["StartDate"], timezone)
-    end_date = to_utc(row["EndDate"], timezone)
+    start_date = to_utc(row["StartPosDatum"] || row["StartDate"], timezone)
+    end_date = to_utc(row["EndPosDatum"] || row["EndDate"], timezone)
     end_date = ensure_end_after_start(start_date, end_date)
 
     %{
@@ -195,6 +201,16 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
 
             _ ->
               calculate_energy_used(all)
+          end
+
+        # Grid energy can never be less than the energy that ended up in the
+        # battery — gaps in the charge rows make the integration undercount,
+        # which would render as >100% charging efficiency. Clamp to added.
+        energy_used =
+          case {energy_used, cp_attrs[:charge_energy_added]} do
+            {%Decimal{} = used, %Decimal{} = added} -> Decimal.max(used, added)
+            {nil, %Decimal{} = added} -> added
+            {used, _} -> used
           end
 
         cp_attrs
@@ -577,7 +593,9 @@ defmodule TeslaMate.Import.TeslaLogger.Mapper do
   defp duration_minutes(nil, _), do: nil
   defp duration_minutes(_, nil), do: nil
 
+  # Same convention as TeslaMate's own drive/charge closing:
+  # round(epoch_seconds / 60), not floor — a 45-second drive is 1 minute.
   defp duration_minutes(%DateTime{} = start_dt, %DateTime{} = end_dt) do
-    DateTime.diff(end_dt, start_dt, :second) |> div(60)
+    (DateTime.diff(end_dt, start_dt, :second) / 60) |> round()
   end
 end
