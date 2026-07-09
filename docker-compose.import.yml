@@ -1,0 +1,42 @@
+# Local TeslaMate with the TeslaLogger-import feature build.
+# Image was built locally from the feature/teslalogger-import branch:
+#   docker build -t teslamate:teslalogger-import .
+#
+# Start:   docker compose -f docker-compose.import.yml up -d
+# Logs:    docker compose -f docker-compose.import.yml logs -f teslamate
+# Stop:    docker compose -f docker-compose.import.yml down
+#
+# Then open http://localhost:4000/import/teslalogger and follow the wizard.
+# The TeslaLogger MySQL connection is entered in the UI — no env vars required.
+
+services:
+  teslamate:
+    image: teslamate:teslalogger-import
+    restart: unless-stopped
+    environment:
+      - ENCRYPTION_KEY=change_me_to_a_long_random_string
+      - DATABASE_USER=teslamate
+      - DATABASE_PASS=secret
+      - DATABASE_NAME=teslamate
+      - DATABASE_HOST=database
+      - DISABLE_MQTT=true
+    ports:
+      - 4000:4000
+    volumes:
+      - teslamate-import-data:/opt/app/import
+    depends_on:
+      - database
+
+  database:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=teslamate
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=teslamate
+    volumes:
+      - teslamate-db:/var/lib/postgresql/data
+
+volumes:
+  teslamate-import-data:
+  teslamate-db:
